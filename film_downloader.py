@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import re
+import csv
+import time
+import argparse
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+######################################################################
+# Dependency Management
+######################################################################
+
+REQUIRED_PACKAGES = [
+    "tqdm",
+    "yt-dlp",   # For Vimeo / YouTube / streaming fallback
+    "gdown"     # For reliable Google Drive handling
+]
+
+_installed_checked = False
+def ensure_dependencies():
+    global _installed_checked
+    if _installed_checked:
+        return
+    missing = []
+    for pkg in REQUIRED_PACKAGES:
+        try:
+            __import__(pkg.replace('-', '_'))
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        print(f"[INFO] Installing missing packages: {', '.join(missing)}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", *missing])
+    _installed_checked = True
+
+ensure_dependencies()
+
+from tqdm import tqdm
+import requests
+
+try:
+    import yt_dlp
+except ImportError:
+    yt_dlp = None
+
+try:
+    import gdown
+except ImportError:
+    gdown = None
+
+try:
+    import readline
+except ImportError:
+    readline = None
+
+######################################################################
+# CLI Argument Parsing
+######################################################################
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Festival Film / Trailer Bulk Downloader")
+    p.add_argument("--csv", help="Path to the CSV file")
+    p.add_argument("--out", default="downloads", help="Root output directory")
+    p.add_argument("--include-stills", action="store_true", help="Include still image URLs")
+    p.add_argument("--include-poster", action="store_true", help="Include poster URLs")
+    p.add_argument("--include-all-http", action="store_true", help="Include ALL http(s) URLs (broad)")
+    p.add_argument("--films-only", action="store_true", help="Only download film assets (skip trailers)")
+    p.add_argument("--max-workers", type=int, default=4, help="Max concurrent downloads")
+    p.add_argument("--retry", type=int, default=1, help="Retry count for direct downloads")
+    p.add_argument("--no-color", action="store_true", help="Disable colored output")
+    p.add_argument("--dry-run", action="store_true", help="Parse only; do not download")
+    p.add_argument("--browser", default=None, help="Browser for cookies-from-browser (chrome, firefox, edge, safari)")
+    p.add_argument("--browser-profile", default=None, help="Browser profile name for cookies-from-browser (optional)")
+    return p.parse_args()
+
+ARGS = parse_args()
+
+COLOR = not ARGS.no_color and sys.stdout.isatty()
+
+def c(text, code):
+    if not COLOR: return text
+    return f"\033[{code}m{text}\033[0m"
+
+def green(s): return c(s, "32")
+def yellow(s): return c(s, "33")
+def red(s): return c(s, "31")
+def blue(s): return c(s, "34")
+
+######################################################################
+# CSV Parsing
+######################################################################
+
+HTTP_URL_PATTERN = re.compile(r"https?://[^\s]+")
+
+FILM_KEYWORDS = [
+    "link and password to download your film",
+    "download your film",
+    "festivaldelivery",
+    "film delivery",
+    "film download",
+    "link to download your film",
+    "link and password"
+]
+TRAILER_KEYWORDS = ["trailer", "teaser"]
+STILLS_KEYWORDS = ["still"]
+POSTER_KEYWORDS = ["poster"]
+
+def normalize_header(h):
+    return (h or "").strip().lower()
+
+def classify_column(header):
+    h = normalize_header(header)
+    if any(k in h for k in FILM_KEYWORDS): return "film"
+    if any(k in h for k in TRAILER_KEYWORDS): return "trailer"
+    if any(k in h for k in STILLS_KEYWORDS): return "stills"
+    if any(k in h for k in POSTER_KEYWORDS): return "poster"
+    return "other"
+
+def extract_urls(cell):
+    if not cell:
+        return []
+    urls = []
+    for f in HTTP_URL_PATTERN.findall(cell):
+        f2 = f.strip().rstrip('),.;]')
+        if f2 not in urls:
+            urls.append(f2)
+    return urls
+
+######################################################################
+# URL Normalization & Strategy
+######################################################################
+
+def is_google_drive(url): return "drive.google.com" in url or "docs.google.com/uc" in url
+def is_dropbox(url): return "dropbox.com" in url
+def is_vimeo_or_stream(url): return any(d in url for d in ["vimeo.com", "youtube.com", "youtu.be"])
+def looks_like_box(url): return "box.com" in url
+def looks_like_wetransfer(url): return "wetransfer.com" in url or "we.tl" in url
+
+def direct_download_transform(url):
+    if is_google_drive(url):
+        file_id = None
+        m = re.search(r"[?&]id=([A-Za-z0-9_\-]+)", url) or re.search(r"/file/d/([A-Za-z0-9_\-]+)/", url)
+        if m:
+            file_id = m.group(1)
+        if file_id:
+            return f"https://drive.google.com/uc?export=download&id={file_id}", "gdrive"
+        return url, "gdrive"
+    if is_dropbox(url):
+        if "?dl=0" in url: return url.replace("?dl=0", "?dl=1"), "direct"
+        if "dl=1" not in url:
+            sep = "&" if "?" in url else "?"
+            return url + sep + "dl=1", "direct"
+        return url, "direct"
+    if is_vimeo_or_stream(url): return url, "yt-dlp"
+    if looks_like_box(url) or looks_like_wetransfer(url): return url, "direct"
+    return url, "direct"
+
+######################################################################
+# Filenames / Sanitization
+######################################################################
+
+INVALID_FS_CHARS = re.compile(r"[<>:\"/\\|?*\x00-\x1F]")
+
+def safe_filename(name, maxlen=180):
+    name = INVALID_FS_CHARS.sub("_", (name or "").strip())
+    if len(name) > maxlen:
+        base, ext = os.path.splitext(name)
+        name = base[: maxlen - len(ext) - 1] + "_" + ext
+    return name or "file"
+
+def guess_extension_from_headers(headers, fallback=".bin"):
+    cd = headers.get("content-disposition")
+    if cd:
+        m = re.search(r'filename="([^"]+)"', cd)
+        if m:
+            return os.path.splitext(m.group(1))[1] or fallback
+    ct = headers.get("content-type", "").lower()
+    mapping = {
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/x-matroska": ".mkv",
+        "application/zip": ".zip",
+        "application/x-zip-compressed": ".zip",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "application/pdf": ".pdf",
+    }
+    for k, v in mapping.items():
+        if k in ct:
+            return v
+    return fallback
+
+######################################################################
+# Download Functions
+######################################################################
+
+lock_print = threading.Lock()
+
+def log(msg, color_func=None):
+    with lock_print:
+        print(color_func(msg) if color_func else msg)
+
+def download_google_drive(url, out_path):
+    if gdown:
+        try:
+            gdown.download(url=url, output=out_path, quiet=True, fuzzy=True)
+            return True, None
+        except Exception as e:
+            return False, f"gdown error: {e}"
+    # Minimal fallback
+    try:
+        with requests.get(url, stream=True, timeout=60) as r:
+            if r.status_code != 200:
+                return False, f"HTTP {r.status_code}"
+            _write_stream(r, out_path)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _content_total_from_resp(resp, resume_pos):
+    # Try to compute total for progress bar
+    # For 206, Content-Range: bytes start-end/total
+    cr = resp.headers.get("content-range")
+    if cr:
+        m = re.search(r"/(\d+)$", cr)
+        if m:
+            return int(m.group(1))
+    try:
+        cl = int(resp.headers.get("content-length", "0") or 0)
+    except Exception:
+        cl = 0
+    return cl + (resume_pos or 0)
+
+def download_direct(url, out_path, retries=1):
+    # Duplicate prevention
+    if os.path.exists(out_path):
+        return True, None, out_path
+
+    tmp = out_path + ".part"
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            headers = {}
+            resume_pos = 0
+            if os.path.exists(tmp):
+                resume_pos = os.path.getsize(tmp)
+                headers["Range"] = f"bytes={resume_pos}-"
+
+            with requests.get(url, stream=True, timeout=60, headers=headers, allow_redirects=True) as r:
+                if r.status_code not in (200, 206):
+                    last_err = f"HTTP {r.status_code}"
+                    continue
+
+                # refine extension if placeholder
+                if os.path.splitext(out_path)[1] == ".bin":
+                    ext = guess_extension_from_headers(r.headers)
+                    if ext and not out_path.endswith(ext):
+                        # adjust tmp name as well
+                        new_out = out_path + ext
+                        new_tmp = new_out + ".part"
+                        # rename existing tmp if present
+                        if os.path.exists(tmp):
+                            os.replace(tmp, new_tmp)
+                        out_path, tmp = new_out, new_tmp
+
+                _write_stream_with_resume(r, tmp, resume_pos)
+                os.replace(tmp, out_path)
+                return True, None, out_path
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(1.5)
+    return False, last_err, out_path
+
+def download_with_ytdlp(url, out_dir, base_name, browser=None, browser_profile=None):
+    if not yt_dlp:
+        return False, "yt-dlp not installed"
+    ydl_opts = {
+        "outtmpl": os.path.join(out_dir, base_name + ".%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "retries": 2,
+        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    }
+    if browser:
+        # Use tuple form to avoid arg parsing errors in yt-dlp
+        if browser_profile:
+            ydl_opts["cookiesfrombrowser"] = (browser, browser_profile)
+        else:
+            ydl_opts["cookiesfrombrowser"] = (browser,)
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            r = ydl.download([url])
+        if r == 0:
+            # locate output
+            for f in os.listdir(out_dir):
+                if f.startswith(base_name + "."):
+                    return True, None
+            return False, "Downloaded but file not found"
+        else:
+            return False, f"yt-dlp returned code {r}"
+    except Exception as e:
+        return False, str(e)
+
+def _write_stream_with_resume(resp, tmp_path, resume_pos):
+    total = _content_total_from_resp(resp, resume_pos)
+    chunk = 1024 * 64
+    mode = "ab" if resume_pos > 0 else "wb"
+    initial = resume_pos if total > 0 else 0
+    with open(tmp_path, mode) as f, tqdm(
+        total=total if total > 0 else None,
+        unit="B",
+        unit_scale=True,
+        desc=os.path.basename(tmp_path).replace(".part", "")[:50],
+        leave=False,
+        initial=initial
+    ) as pbar:
+        for data in resp.iter_content(chunk_size=chunk):
+            if not data:
+                continue
+            f.write(data)
+            if total > 0:
+                pbar.update(len(data))
+
+def _write_stream(resp, path):
+    # non-resume helper (used by gdrive fallback)
+    tmp = path + ".part"
+    total = int(resp.headers.get("content-length", "0") or 0)
+    chunk = 1024 * 64
+    with open(tmp, "wb") as f, tqdm(
+        total=total if total > 0 else None,
+        unit="B",
+        unit_scale=True,
+        desc=os.path.basename(path)[:50],
+        leave=False
+    ) as pbar:
+        for data in resp.iter_content(chunk_size=chunk):
+            if data:
+                f.write(data)
+                if total > 0:
+                    pbar.update(len(data))
+    os.replace(tmp, path)
+
+######################################################################
+# Task Orchestration
+######################################################################
+
+def determine_asset_type(col_class, header_text, url):
+    if col_class in ("film", "trailer", "stills", "poster"):
+        return col_class
+    h = normalize_header(header_text)
+    if any(k in h for k in FILM_KEYWORDS): return "film"
+    if any(k in h for k in TRAILER_KEYWORDS): return "trailer"
+    if any(k in h for k in STILLS_KEYWORDS): return "stills"
+    if any(k in h for k in POSTER_KEYWORDS): return "poster"
+    if "trailer" in (url or "").lower() or "teaser" in (url or "").lower():
+        return "trailer"
+    return "other"
+
+def should_include(asset_type):
+    if asset_type == "film": return True
+    if asset_type == "trailer" and not ARGS.films_only: return True
+    if asset_type == "stills" and ARGS.include_stills: return True
+    if asset_type == "poster" and ARGS.include_poster: return True
+    if ARGS.include_all_http: return True
+    return False
+
+def load_csv_rows(path):
+    rows = []
+    with open(path, "r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    return rows
+
+def gather_download_jobs(csv_path):
+    rows = load_csv_rows(csv_path)
+    jobs = []
+    for idx, row in enumerate(rows):
+        film_name = row.get("Film Name") or row.get("Film") or f"Row{idx+1}"
+        film_name = film_name.strip() if film_name else f"Row{idx+1}"
+        for header, value in row.items():
+            if not value:
+                continue
+            urls = extract_urls(value)
+            if not urls:
+                continue
+            col_class = classify_column(header)
+            for url in urls:
+                asset_type = determine_asset_type(col_class, header, url)
+                if should_include(asset_type):
+                    jobs.append({
+                        "row_index": idx + 1,
+                        "film_name": film_name,
+                        "header": header,
+                        "url": url,
+                        "asset_type": asset_type
+                    })
+    return rows, jobs
+
+######################################################################
+# Execution
+######################################################################
+
+def main():
+    csv_path = ARGS.csv
+
+    # Interactive CSV selection
+    if not csv_path:
+        csv_files = [f for f in os.listdir('.') if f.lower().endswith('.csv')]
+        if len(csv_files) == 1:
+            csv_path = csv_files[0]
+            print(blue(f"Found CSV file in current directory: {csv_path}"))
+            confirm = input("Is this the correct file? (Y/n): ").strip().lower()
+            if confirm not in ("", "y", "yes"):
+                csv_path = None
+        elif len(csv_files) > 1:
+            print(blue("Multiple CSV files found in the current directory:"))
+            for i, f in enumerate(csv_files, 1):
+                print(f"  {i}. {f}")
+            choice = input("Enter the number of the file to use, or press Enter to specify manually: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(csv_files):
+                csv_path = csv_files[int(choice) - 1]
+            else:
+                csv_path = None
+
+    if not csv_path:
+        if readline:
+            try:
+                readline.parse_and_bind("tab: complete")
+            except Exception:
+                pass
+        csv_path = input("Enter path to CSV file: ").strip('"').strip()
+    if not os.path.isfile(csv_path):
+        print(red(f"ERROR: CSV file not found: {csv_path}"))
+        sys.exit(1)
+
+    os.makedirs(ARGS.out, exist_ok=True)
+
+    print(blue("[STEP] Parsing CSV..."))
+    rows, jobs = gather_download_jobs(csv_path)
+    print(f"  Found {len(rows)} data rows.")
+    print(f"  Extracted {len(jobs)} candidate download URLs after filtering.\n")
+
+    if ARGS.dry_run:
+        print(yellow("[DRY RUN] Listing parsed jobs:"))
+        for j in jobs[:50]:
+            print(f" - Row {j['row_index']} [{j['asset_type']}] {j['film_name']}: {j['url']}")
+        if len(jobs) > 50:
+            print(f"... ({len(jobs) - 50} more)")
+        print("\n(No downloads performed in dry-run mode.)")
+        return
+
+    print(blue("[STEP] Starting downloads..."))
+    report_rows = []
+    counter = 0
+
+    def worker(job):
+        nonlocal counter
+        film_dir_name = safe_filename(job["film_name"]) or f"Film_{job['row_index']}"
+        dest_dir = os.path.join(ARGS.out, film_dir_name, job["asset_type"])
+        os.makedirs(dest_dir, exist_ok=True)
+
+        raw_url = job["url"].strip()
+        transformed_url, strategy = direct_download_transform(raw_url)
+
+        base_file_name = safe_filename(f"{job['film_name']}_{job['asset_type']}")
+        counter += 1
+
+        # Try to guess extension up-front
+        ext = ".bin"
+        try:
+            head_resp = requests.head(raw_url, allow_redirects=True, timeout=10)
+            if head_resp.status_code == 200:
+                ext = guess_extension_from_headers(head_resp.headers, fallback=ext)
+        except Exception:
+            pass
+
+        out_path = os.path.join(dest_dir, base_file_name + ext)
+
+        status = "FAILED"
+        detail = ""
+        final_path = ""
+
+        try:
+            if strategy == "gdrive":
+                ok, err = download_google_drive(transformed_url, out_path)
+                if ok:
+                    status = "OK"
+                    final_path = out_path
+                else:
+                    detail = err or "unknown gdrive error"
+
+            elif strategy == "yt-dlp":
+                ok, err = download_with_ytdlp(
+                    transformed_url,
+                    dest_dir,
+                    base_file_name,
+                    browser=ARGS.browser,
+                    browser_profile=ARGS.browser_profile
+                )
+                if ok:
+                    status = "OK"
+                    for f in os.listdir(dest_dir):
+                        if f.startswith(base_file_name + "."):
+                            final_path = os.path.join(dest_dir, f)
+                            break
+                else:
+                    detail = err or "yt-dlp error"
+
+            else:
+                ok, err, maybe_path = download_direct(transformed_url, out_path, retries=ARGS.retry)
+                if ok:
+                    status = "OK"
+                    final_path = maybe_path
+                else:
+                    detail = err or "direct download error"
+
+        except Exception as e:
+            detail = str(e)
+
+        if status == "OK":
+            log(f"[OK] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)}", green)
+        else:
+            log(f"[FAIL] {job['asset_type']} | {job['film_name']} | {raw_url} | {detail}", red)
+
+        report_rows.append({
+            "row_index": job["row_index"],
+            "film_name": job["film_name"],
+            "asset_type": job["asset_type"],
+            "header": job["header"],
+            "original_url": raw_url,
+            "transformed_url": transformed_url,
+            "strategy": strategy,
+            "status": status,
+            "detail": detail,
+            "saved_path": final_path
+        })
+    # end worker
+
+    with ThreadPoolExecutor(max_workers=ARGS.max_workers) as ex:
+        futures = [ex.submit(worker, job) for job in jobs]
+        for _ in tqdm(as_completed(futures), total=len(futures), desc="All Downloads", unit="file"):
+            pass
+
+    report_path = os.path.join(ARGS.out, "download_report.csv")
+    fieldnames = [
+        "row_index", "film_name", "asset_type", "header", "original_url",
+        "transformed_url", "strategy", "status", "detail", "saved_path"
+    ]
+
