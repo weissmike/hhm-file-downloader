@@ -103,6 +103,7 @@ def parse_args():
 
 ARGS = parse_args()
 
+
 # Load and update config for persistent download directory
 _config = load_config()
 if ARGS.out:
@@ -110,6 +111,28 @@ if ARGS.out:
     save_config(_config)
 if not ARGS.out:
     ARGS.out = _config.get("download_dir", "downloads")
+
+# --- Google Sheets support ---
+import io
+import urllib.parse
+import requests
+
+def is_google_sheet_link(link):
+    if not link:
+        return False
+    return "docs.google.com/spreadsheets" in link or (len(link) == 44 and link.isalnum())
+
+def get_sheet_id_from_link(link):
+    if "/d/" in link:
+        return link.split("/d/")[1].split("/")[0]
+    return link
+
+def fetch_google_sheet_csv(sheet_link_or_id):
+    sheet_id = get_sheet_id_from_link(sheet_link_or_id)
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    resp = requests.get(export_url)
+    resp.raise_for_status()
+    return io.StringIO(resp.text)
 
 COLOR = not ARGS.no_color and sys.stdout.isatty()
 
@@ -429,10 +452,17 @@ def should_include(asset_type):
 
 def load_csv_rows(path):
     rows = []
-    with open(path, "r", newline="", encoding="utf-8-sig") as f:
+    # Accept either a file path or a Google Sheet link/ID
+    if is_google_sheet_link(path):
+        f = fetch_google_sheet_csv(path)
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)
+    else:
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
     return rows
 
 def gather_download_jobs(csv_path):

@@ -106,6 +106,40 @@ Some Vimeo links require you to be logged in to download. To allow yt-dlp to acc
 
 For more details, see the [yt-dlp cookies guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
 
+## Asset Organization Workflow
+
+The `organize_assets.py` script uses the same configuration as the downloader to keep your workflow consistent and flexible.
+
+- **Config file:** `.film_downloader_config.json` stores the following keys:
+  - `root_dir`: The root directory for all assets (default: `D:/HHM`)
+  - `download_dir`: The folder where the downloader puts new files (default: `<root>/downloads`)
+  - `unsorted_dir`: A drop zone for any loose or extra files you want to organize (default: `<root>/Unsorted`)
+
+- **How it works:**
+  - The script reads these paths from the config file (and adds missing keys if needed).
+  - It recursively processes both the `download_dir` and `unsorted_dir`, moving files into the correct `Features` and `Shorts` folders and subfolders by asset type.
+  - Aggregate folders (e.g., `_Films`, `_Trailers`, etc.) are rebuilt as symlink collections for easy access.
+
+- **Workflow:**
+  1. Drop any new/loose files into your `unsorted_dir` (see config).
+  2. Run `film_downloader.py` as usual to fetch new downloads into `download_dir`.
+  3. Run `organize_assets.py` to sort everything into the master structure.
+  4. All config paths can be changed by editing `.film_downloader_config.json`.
+
+- **Example config:**
+
+```json
+{
+  "root_dir": "D:/HHM",
+  "download_dir": "D:/HHM/downloads",
+  "unsorted_dir": "D:/HHM/Unsorted"
+}
+```
+
+- **Tip:**
+  - You can add or change these paths in the config file at any time to match your storage layout.
+  - The organizer will always use the latest config values.
+
 ---
 
 - Ensure the CSV file is properly formatted with headers and valid URLs.
