@@ -54,6 +54,10 @@ Customize the script's behavior using the following options:
 - `--no-color`: Disable colored output.
 - `--dry-run`: Parse the CSV without downloading.
 
+### Additional Options
+
+- `--log-level <debug|none>`: Control output verbosity. `debug` (default) shows detailed logs and progress bars; `none` suppresses logs and progress bars except for final summary.
+
 ### Examples
 
 Download all films and trailers:
@@ -68,12 +72,41 @@ Perform a dry run to preview parsed jobs:
 python film_downloader.py --csv path/to/file.csv --dry-run
 ```
 
-### Output
+### Output & Logging
 
 - Files are saved in the output directory, organized by film name and asset type.
 - A `download_report.csv` is created, detailing the success or failure of each download.
+- Progress bars are only shown for files actively being downloaded (not for skipped or already completed files).
+- If `--log-level none` is set, all logs and progress bars are suppressed except for the final summary.
+- To save all output to a file, run:
 
-### Notes
+  ```powershell
+  python film_downloader.py ...args... *> out.log 2>&1
+  ```
+
+- `out.log` and `cookies.txt` are excluded from source control via `.gitignore`.
+
+### Vimeo & Authenticated Downloads: Using a Cookies File
+
+Some Vimeo links require you to be logged in to download. To allow yt-dlp to access these, you can export your browser cookies and pass them to the script:
+
+1. **Install the "Get cookies.txt" browser extension:**
+	- [Chrome/Edge/Brave/Opera](https://chrome.google.com/webstore/detail/get-cookiestxt/)
+	- [Firefox](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)
+
+2. **Log in to Vimeo in your browser.**
+
+3. **Click the extension icon and export cookies for `vimeo.com` as `cookies.txt`.**
+
+4. **Pass the cookies file to the script:**
+
+	```bash
+	python film_downloader.py --csv path/to/file.csv --cookies path/to/cookies.txt
+	```
+
+For more details, see the [yt-dlp cookies guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+
+---
 
 - Ensure the CSV file is properly formatted with headers and valid URLs.
 - Review the `download_report.csv` for any issues with downloads.

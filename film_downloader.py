@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+
 import sys
 import os
 import re
@@ -8,6 +9,7 @@ import time
 import argparse
 import subprocess
 import threading
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ######################################################################
@@ -60,23 +62,54 @@ except ImportError:
 # CLI Argument Parsing
 ######################################################################
 
+
+CONFIG_FILE = ".film_downloader_config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+
 def parse_args():
-    p = argparse.ArgumentParser(description="Festival Film / Trailer Bulk Downloader")
-    p.add_argument("--csv", help="Path to the CSV file")
-    p.add_argument("--out", default="downloads", help="Root output directory")
-    p.add_argument("--include-stills", action="store_true", help="Include still image URLs")
-    p.add_argument("--include-poster", action="store_true", help="Include poster URLs")
-    p.add_argument("--include-all-http", action="store_true", help="Include ALL http(s) URLs (broad)")
-    p.add_argument("--films-only", action="store_true", help="Only download film assets (skip trailers)")
-    p.add_argument("--max-workers", type=int, default=4, help="Max concurrent downloads")
-    p.add_argument("--retry", type=int, default=1, help="Retry count for direct downloads")
-    p.add_argument("--no-color", action="store_true", help="Disable colored output")
-    p.add_argument("--dry-run", action="store_true", help="Parse only; do not download")
-    p.add_argument("--browser", default=None, help="Browser for cookies-from-browser (chrome, firefox, edge, safari)")
-    p.add_argument("--browser-profile", default=None, help="Browser profile name for cookies-from-browser (optional)")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="Festival Film / Trailer Bulk Downloader")
+    parser.add_argument("--csv", help="Path to the CSV file")
+    parser.add_argument("--out", default=None, help="Root output directory (persists for future runs)")
+    parser.add_argument("--include-stills", action="store_true", help="Include still image URLs")
+    parser.add_argument("--include-poster", action="store_true", help="Include poster URLs")
+    parser.add_argument("--include-all-http", action="store_true", help="Include ALL http(s) URLs (broad)")
+    parser.add_argument("--films-only", action="store_true", help="Only download film assets (skip trailers)")
+    parser.add_argument("--max-workers", type=int, default=4, help="Max concurrent downloads")
+    parser.add_argument("--retry", type=int, default=1, help="Retry count for direct downloads")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
+    parser.add_argument("--dry-run", action="store_true", help="Parse only; do not download")
+    parser.add_argument("--browser", default=None, help="Browser for cookies-from-browser (chrome, firefox, edge, safari)")
+    parser.add_argument("--browser-profile", default=None, help="Browser profile name for cookies-from-browser (optional)")
+    parser.add_argument("--cookies", default=None, help="Path to cookies.txt file for yt-dlp (Vimeo login)")
+    parser.add_argument("--log-level", default="debug", choices=["debug", "none"], help="Set log level: debug or none (default: debug)")
+    return parser.parse_args()
+
+
 
 ARGS = parse_args()
+
+# Load and update config for persistent download directory
+_config = load_config()
+if ARGS.out:
+    _config["download_dir"] = ARGS.out
+    save_config(_config)
+if not ARGS.out:
+    ARGS.out = _config.get("download_dir", "downloads")
 
 COLOR = not ARGS.no_color and sys.stdout.isatty()
 
@@ -128,6 +161,21 @@ def extract_urls(cell):
         if f2 not in urls:
             urls.append(f2)
     return urls
+
+# Extract URLs and possible passwords from a cell
+def extract_urls_and_password(cell):
+    if not cell:
+        return []
+    urls = []
+    # Look for password patterns
+    pw_match = re.search(r'(?:password|pw|pass)\s*[:=\-]?\s*([\w\d!@#$%^&*()_+\-]+)', cell, re.IGNORECASE)
+    password = pw_match.group(1) if pw_match else None
+    for f in HTTP_URL_PATTERN.findall(cell):
+        f2 = f.strip().rstrip('),.;]')
+        if f2 not in urls:
+            urls.append(f2)
+    # Return list of dicts: [{url, password}]
+    return [{"url": u, "password": password} for u in urls]
 
 ######################################################################
 # URL Normalization & Strategy
@@ -274,12 +322,12 @@ def download_direct(url, out_path, retries=1):
             time.sleep(1.5)
     return False, last_err, out_path
 
-def download_with_ytdlp(url, out_dir, base_name, browser=None, browser_profile=None):
+def download_with_ytdlp(url, out_dir, base_name, browser=None, browser_profile=None, cookies=None, video_password=None, tqdm_position=None):
     if not yt_dlp:
         return False, "yt-dlp not installed"
     ydl_opts = {
         "outtmpl": os.path.join(out_dir, base_name + ".%(ext)s"),
-        "quiet": True,
+        "quiet": True,  # Suppress yt-dlp's own progress output
         "no_warnings": True,
         "ignoreerrors": True,
         "retries": 2,
@@ -291,10 +339,19 @@ def download_with_ytdlp(url, out_dir, base_name, browser=None, browser_profile=N
             ydl_opts["cookiesfrombrowser"] = (browser, browser_profile)
         else:
             ydl_opts["cookiesfrombrowser"] = (browser,)
+    if cookies:
+        ydl_opts["cookiefile"] = cookies
+    if video_password:
+        ydl_opts["video_password"] = video_password
 
+    # Show a tqdm bar for yt-dlp (simulate progress, since yt-dlp's is suppressed)
+    desc = f"yt-dlp: {base_name[:40]}"
+    pbar = tqdm(total=1, desc=desc, position=tqdm_position, leave=True, bar_format='{desc} | {bar} {n_fmt}/{total_fmt}')
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             r = ydl.download([url])
+        pbar.update(1)
+        pbar.close()
         if r == 0:
             # locate output
             for f in os.listdir(out_dir):
@@ -304,6 +361,7 @@ def download_with_ytdlp(url, out_dir, base_name, browser=None, browser_profile=N
         else:
             return False, f"yt-dlp returned code {r}"
     except Exception as e:
+        pbar.close()
         return False, str(e)
 
 def _write_stream_with_resume(resp, tmp_path, resume_pos):
@@ -386,11 +444,13 @@ def gather_download_jobs(csv_path):
         for header, value in row.items():
             if not value:
                 continue
-            urls = extract_urls(value)
-            if not urls:
+            url_pw_list = extract_urls_and_password(value)
+            if not url_pw_list:
                 continue
             col_class = classify_column(header)
-            for url in urls:
+            for up in url_pw_list:
+                url = up["url"]
+                password = up["password"]
                 asset_type = determine_asset_type(col_class, header, url)
                 if should_include(asset_type):
                     jobs.append({
@@ -398,7 +458,8 @@ def gather_download_jobs(csv_path):
                         "film_name": film_name,
                         "header": header,
                         "url": url,
-                        "asset_type": asset_type
+                        "asset_type": asset_type,
+                        "video_password": password
                     })
     return rows, jobs
 
@@ -459,7 +520,8 @@ def main():
     report_rows = []
     counter = 0
 
-    def worker(job):
+
+    def worker(job, tqdm_position):
         nonlocal counter
         film_dir_name = safe_filename(job["film_name"]) or f"Film_{job['row_index']}"
         dest_dir = os.path.join(ARGS.out, film_dir_name, job["asset_type"])
@@ -481,6 +543,91 @@ def main():
             pass
 
         out_path = os.path.join(dest_dir, base_file_name + ext)
+        log(f"[DEBUG] base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'", yellow)
+
+        # Check if file already exists and is complete BEFORE any download attempt
+        skip = False
+        local_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+        remote_size = None
+        log(f"Checking for completed file: '{out_path}'", yellow)
+        found_completed = False
+        completed_path = None
+        completed_size = 0
+        found_part = False
+        part_path = None
+        # Robust base name matching for all strategies before any download attempt
+        base_dir = os.path.dirname(out_path)
+        dir_files = os.listdir(base_dir)
+        log(f"[DEBUG] Files in directory '{base_dir}': {dir_files}", yellow)
+        def strip_all_ext(name):
+            while True:
+                root, ext = os.path.splitext(name)
+                if ext:
+                    name = root
+                else:
+                    break
+            return name
+
+        base_stripped = strip_all_ext(base_file_name)
+        for fname in dir_files:
+            candidate_path = os.path.join(base_dir, fname)
+            candidate_stripped = strip_all_ext(fname)
+            log(f"[DEBUG] Checking candidate: '{fname}', stripped: '{candidate_stripped}' vs base_stripped: '{base_stripped}'", yellow)
+            if candidate_stripped == base_stripped:
+                if fname.endswith('.part'):
+                    found_part = True
+                    part_path = candidate_path
+                    log(f"Found .part file: '{candidate_path}' (will resume)", yellow)
+                else:
+                    candidate_size = os.path.getsize(candidate_path)
+                    log(f"Found candidate: '{candidate_path}' ({candidate_size} bytes)", yellow)
+                    # Consider 'large' as >10MB (10*1024*1024)
+                    if candidate_size > 10*1024*1024:
+                        found_completed = True
+                        completed_path = candidate_path
+                        completed_size = candidate_size
+        if found_part:
+            log(f"Resume enabled: .part file exists at '{part_path}'", yellow)
+            skip = False
+        elif found_completed:
+            log(f"Found completed file: '{completed_path}' ({completed_size} bytes)", yellow)
+            skip = True
+        # For direct, if not found, check remote size if file exists at out_path
+        if not skip:
+            if os.path.exists(out_path) and local_size > 0:
+                log(f"Found file: '{out_path}' ({local_size} bytes)", yellow)
+                if strategy == "direct":
+                    try:
+                        head = requests.head(raw_url, allow_redirects=True, timeout=10)
+                        if head.status_code == 200:
+                            remote_size = int(head.headers.get("content-length", "0") or 0)
+                    except Exception:
+                        pass
+                    if remote_size and local_size == remote_size:
+                        skip = True
+            else:
+                log(f"Not found: '{out_path}'", yellow)
+
+        final_path = completed_path if found_completed else out_path
+        if skip:
+            status = "SKIPPED"
+            detail = f"File already exists. Local size: {completed_size if found_completed else local_size} bytes. Remote size: {remote_size if remote_size is not None else 'unknown'} bytes."
+            # Only print skip line if log-level is debug
+            if globals().get('LOG_LEVEL', 'debug') == "debug":
+                print(f"[SKIP] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)} | Local: {completed_size if found_completed else local_size} | Remote: {remote_size if remote_size is not None else 'unknown'}")
+            report_rows.append({
+                "row_index": job["row_index"],
+                "film_name": job["film_name"],
+                "asset_type": job["asset_type"],
+                "header": job["header"],
+                "original_url": raw_url,
+                "transformed_url": transformed_url,
+                "strategy": strategy,
+                "status": status,
+                "detail": detail,
+                "saved_path": final_path
+            })
+            return
 
         status = "FAILED"
         detail = ""
@@ -496,13 +643,29 @@ def main():
                     detail = err or "unknown gdrive error"
 
             elif strategy == "yt-dlp":
-                ok, err = download_with_ytdlp(
-                    transformed_url,
-                    dest_dir,
-                    base_file_name,
-                    browser=ARGS.browser,
-                    browser_profile=ARGS.browser_profile
-                )
+                log_level = globals().get('LOG_LEVEL', 'debug')
+                if log_level == "none":
+                    ok, err = download_with_ytdlp(
+                        transformed_url,
+                        dest_dir,
+                        base_file_name,
+                        browser=ARGS.browser,
+                        browser_profile=ARGS.browser_profile,
+                        cookies=ARGS.cookies,
+                        video_password=job.get("video_password"),
+                        tqdm_position=None
+                    )
+                else:
+                    ok, err = download_with_ytdlp(
+                        transformed_url,
+                        dest_dir,
+                        base_file_name,
+                        browser=ARGS.browser,
+                        browser_profile=ARGS.browser_profile,
+                        cookies=ARGS.cookies,
+                        video_password=job.get("video_password"),
+                        tqdm_position=tqdm_position
+                    )
                 if ok:
                     status = "OK"
                     for f in os.listdir(dest_dir):
@@ -513,7 +676,13 @@ def main():
                     detail = err or "yt-dlp error"
 
             else:
-                ok, err, maybe_path = download_direct(transformed_url, out_path, retries=ARGS.retry)
+                log_level = globals().get('LOG_LEVEL', 'debug')
+                if log_level == "none":
+                    ok, err, maybe_path = download_direct(transformed_url, out_path, retries=ARGS.retry)
+                else:
+                    with tqdm(total=1, desc=f"direct: {base_file_name[:40]}", position=tqdm_position, leave=True, bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+                        ok, err, maybe_path = download_direct(transformed_url, out_path, retries=ARGS.retry)
+                        pbar.update(1)
                 if ok:
                     status = "OK"
                     final_path = maybe_path
@@ -522,7 +691,6 @@ def main():
 
         except Exception as e:
             detail = str(e)
-
         if status == "OK":
             log(f"[OK] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)}", green)
         else:
@@ -542,14 +710,26 @@ def main():
         })
     # end worker
 
+
     with ThreadPoolExecutor(max_workers=ARGS.max_workers) as ex:
-        futures = [ex.submit(worker, job) for job in jobs]
+        # Assign a tqdm position to each job (up to max_workers)
+        futures = []
+        for i, job in enumerate(jobs):
+            pos = i % ARGS.max_workers
+            futures.append(ex.submit(worker, job, pos))
         for _ in tqdm(as_completed(futures), total=len(futures), desc="All Downloads", unit="file"):
             pass
 
     report_path = os.path.join(ARGS.out, "download_report.csv")
+
     fieldnames = [
         "row_index", "film_name", "asset_type", "header", "original_url",
         "transformed_url", "strategy", "status", "detail", "saved_path"
     ]
+
+
+# Entry point for script execution
+if __name__ == "__main__":
+    print(blue("\n[INFO] For Vimeo downloads requiring login, use --cookies <cookies.txt> (see yt-dlp wiki for details)."))
+    main()
 

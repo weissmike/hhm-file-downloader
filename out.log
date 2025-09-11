@@ -1,1 +1,8 @@
-2025-09-07 22:49:37,961 - INFO - Logging setup complete. This is a test log message.
+usage: film_downloader.py [-h] [--csv CSV] [--out OUT] [--include-stills]
+                          [--include-poster] [--include-all-http]
+                          [--films-only] [--max-workers MAX_WORKERS]
+                          [--retry RETRY] [--no-color] [--dry-run]
+                          [--browser BROWSER]
+                          [--browser-profile BROWSER_PROFILE]
+                          [--cookies COOKIES] [--log-level {debug,none}]
+film_downloader.py: error: unrecognized arguments: *

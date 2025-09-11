@@ -1,0 +1,25 @@
+# Exclude log and credential files
+out.log
+cookies.txt
+# Ignore Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+
+
+# Ignore output, logs, and CSVs
+downloads/
+out.log
+download_report.csv
+*.csv
+
+# Ignore config and cookies
+.film_downloader_config.json
+cookies.txt
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
