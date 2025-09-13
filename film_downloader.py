@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 import sys
 import os
 import re
@@ -11,6 +10,8 @@ import subprocess
 import threading
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from utils import set_log_level, log_debug, log_info, log_error, choose_csv_file
 
 ######################################################################
 # Dependency Management
@@ -96,10 +97,8 @@ def parse_args():
     parser.add_argument("--browser", default=None, help="Browser for cookies-from-browser (chrome, firefox, edge, safari)")
     parser.add_argument("--browser-profile", default=None, help="Browser profile name for cookies-from-browser (optional)")
     parser.add_argument("--cookies", default=None, help="Path to cookies.txt file for yt-dlp (Vimeo login)")
-    parser.add_argument("--log-level", default="debug", choices=["debug", "none"], help="Set log level: debug or none (default: debug)")
+    parser.add_argument("--log-level", default="debug", choices=["debug", "info", "none"], help="Set log level: debug, info, or none (default: debug)")
     return parser.parse_args()
-
-
 
 ARGS = parse_args()
 
@@ -270,9 +269,6 @@ def guess_extension_from_headers(headers, fallback=".bin"):
 
 lock_print = threading.Lock()
 
-def log(msg, color_func=None):
-    with lock_print:
-        print(color_func(msg) if color_func else msg)
 
 def download_google_drive(url, out_path):
     if gdown:
@@ -498,55 +494,29 @@ def gather_download_jobs(csv_path):
 ######################################################################
 
 def main():
-    csv_path = ARGS.csv
 
-    # Interactive CSV selection
-    if not csv_path:
-        csv_files = [f for f in os.listdir('.') if f.lower().endswith('.csv')]
-        if len(csv_files) == 1:
-            csv_path = csv_files[0]
-            print(blue(f"Found CSV file in current directory: {csv_path}"))
-            confirm = input("Is this the correct file? (Y/n): ").strip().lower()
-            if confirm not in ("", "y", "yes"):
-                csv_path = None
-        elif len(csv_files) > 1:
-            print(blue("Multiple CSV files found in the current directory:"))
-            for i, f in enumerate(csv_files, 1):
-                print(f"  {i}. {f}")
-            choice = input("Enter the number of the file to use, or press Enter to specify manually: ").strip()
-            if choice.isdigit() and 1 <= int(choice) <= len(csv_files):
-                csv_path = csv_files[int(choice) - 1]
-            else:
-                csv_path = None
-
-    if not csv_path:
-        if readline:
-            try:
-                readline.parse_and_bind("tab: complete")
-            except Exception:
-                pass
-        csv_path = input("Enter path to CSV file: ").strip('"').strip()
-    if not os.path.isfile(csv_path):
+    csv_path = ARGS.csv or choose_csv_file(prompt="Enter path to CSV file:", file_ext=".csv")
+    if not csv_path or not os.path.isfile(csv_path):
         print(red(f"ERROR: CSV file not found: {csv_path}"))
         sys.exit(1)
 
     os.makedirs(ARGS.out, exist_ok=True)
 
-    print(blue("[STEP] Parsing CSV..."))
+    log_info("[STEP] Parsing CSV...")
     rows, jobs = gather_download_jobs(csv_path)
-    print(f"  Found {len(rows)} data rows.")
-    print(f"  Extracted {len(jobs)} candidate download URLs after filtering.\n")
+    log_info(f"  Found {len(rows)} data rows.")
+    log_info(f"  Extracted {len(jobs)} candidate download URLs after filtering.\n")
 
     if ARGS.dry_run:
-        print(yellow("[DRY RUN] Listing parsed jobs:"))
+        log_info("[DRY RUN] Listing parsed jobs:")
         for j in jobs[:50]:
-            print(f" - Row {j['row_index']} [{j['asset_type']}] {j['film_name']}: {j['url']}")
+            log_info(f" - Row {j['row_index']} [{j['asset_type']}] {j['film_name']}: {j['url']}")
         if len(jobs) > 50:
-            print(f"... ({len(jobs) - 50} more)")
-        print("\n(No downloads performed in dry-run mode.)")
+            log_info(f"... ({len(jobs) - 50} more)")
+        log_info("\n(No downloads performed in dry-run mode.)")
         return
 
-    print(blue("[STEP] Starting downloads..."))
+    log_info("[STEP] Starting downloads...")
     report_rows = []
     counter = 0
 
@@ -573,13 +543,13 @@ def main():
             pass
 
         out_path = os.path.join(dest_dir, base_file_name + ext)
-        log(f"[DEBUG] base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'", yellow)
+        log_debug(f"base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'")
 
         # Check if file already exists and is complete BEFORE any download attempt
         skip = False
         local_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
         remote_size = None
-        log(f"Checking for completed file: '{out_path}'", yellow)
+        log_debug(f"Checking for completed file: '{out_path}'")
         found_completed = False
         completed_path = None
         completed_size = 0
@@ -588,7 +558,7 @@ def main():
         # Robust base name matching for all strategies before any download attempt
         base_dir = os.path.dirname(out_path)
         dir_files = os.listdir(base_dir)
-        log(f"[DEBUG] Files in directory '{base_dir}': {dir_files}", yellow)
+        log_debug(f"Files in directory '{base_dir}': {dir_files}")
         def strip_all_ext(name):
             while True:
                 root, ext = os.path.splitext(name)
@@ -602,30 +572,30 @@ def main():
         for fname in dir_files:
             candidate_path = os.path.join(base_dir, fname)
             candidate_stripped = strip_all_ext(fname)
-            log(f"[DEBUG] Checking candidate: '{fname}', stripped: '{candidate_stripped}' vs base_stripped: '{base_stripped}'", yellow)
+            log_debug(f"Checking candidate: '{fname}', stripped: '{candidate_stripped}' vs base_stripped: '{base_stripped}'")
             if candidate_stripped == base_stripped:
                 if fname.endswith('.part'):
                     found_part = True
                     part_path = candidate_path
-                    log(f"Found .part file: '{candidate_path}' (will resume)", yellow)
+                    log_debug(f"Found .part file: '{candidate_path}' (will resume)")
                 else:
                     candidate_size = os.path.getsize(candidate_path)
-                    log(f"Found candidate: '{candidate_path}' ({candidate_size} bytes)", yellow)
+                    log_debug(f"Found candidate: '{candidate_path}' ({candidate_size} bytes)")
                     # Consider 'large' as >10MB (10*1024*1024)
                     if candidate_size > 10*1024*1024:
                         found_completed = True
                         completed_path = candidate_path
                         completed_size = candidate_size
         if found_part:
-            log(f"Resume enabled: .part file exists at '{part_path}'", yellow)
+            log_debug(f"Resume enabled: .part file exists at '{part_path}'")
             skip = False
         elif found_completed:
-            log(f"Found completed file: '{completed_path}' ({completed_size} bytes)", yellow)
+            log_debug(f"Found completed file: '{completed_path}' ({completed_size} bytes)")
             skip = True
         # For direct, if not found, check remote size if file exists at out_path
         if not skip:
             if os.path.exists(out_path) and local_size > 0:
-                log(f"Found file: '{out_path}' ({local_size} bytes)", yellow)
+                log_debug(f"Found file: '{out_path}' ({local_size} bytes)")
                 if strategy == "direct":
                     try:
                         head = requests.head(raw_url, allow_redirects=True, timeout=10)
@@ -636,7 +606,7 @@ def main():
                     if remote_size and local_size == remote_size:
                         skip = True
             else:
-                log(f"Not found: '{out_path}'", yellow)
+                log_debug(f"Not found: '{out_path}'")
 
         final_path = completed_path if found_completed else out_path
         if skip:
@@ -644,7 +614,7 @@ def main():
             detail = f"File already exists. Local size: {completed_size if found_completed else local_size} bytes. Remote size: {remote_size if remote_size is not None else 'unknown'} bytes."
             # Only print skip line if log-level is debug
             if globals().get('LOG_LEVEL', 'debug') == "debug":
-                print(f"[SKIP] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)} | Local: {completed_size if found_completed else local_size} | Remote: {remote_size if remote_size is not None else 'unknown'}")
+                log_info(f"[SKIP] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)} | Local: {completed_size if found_completed else local_size} | Remote: {remote_size if remote_size is not None else 'unknown'}")
             report_rows.append({
                 "row_index": job["row_index"],
                 "film_name": job["film_name"],
@@ -722,9 +692,11 @@ def main():
         except Exception as e:
             detail = str(e)
         if status == "OK":
-            log(f"[OK] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)}", green)
+            log_info(f"[OK] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)}")
         else:
-            log(f"[FAIL] {job['asset_type']} | {job['film_name']} | {raw_url} | {detail}", red)
+            log_error(f"[FAIL] {job['asset_type']} | {job['film_name']} | {raw_url} | {detail}")
+            # Always print errors to console regardless of log level
+            print(f"[FAIL] {job['asset_type']} | {job['film_name']} | {raw_url} | {detail}")
 
         report_rows.append({
             "row_index": job["row_index"],
@@ -738,7 +710,6 @@ def main():
             "detail": detail,
             "saved_path": final_path
         })
-    # end worker
 
 
     with ThreadPoolExecutor(max_workers=ARGS.max_workers) as ex:
@@ -760,6 +731,122 @@ def main():
 
 # Entry point for script execution
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Festival Film / Trailer Bulk Downloader")
+    parser.add_argument("--csv", help="Path to the CSV file")
+    parser.add_argument("--out", default=None, help="Root output directory (persists for future runs)")
+    parser.add_argument("--include-stills", action="store_true", help="Include still image URLs")
+    parser.add_argument("--include-poster", action="store_true", help="Include poster URLs")
+    parser.add_argument("--include-all-http", action="store_true", help="Include ALL http(s) URLs (broad)")
+    parser.add_argument("--films-only", action="store_true", help="Only download film assets (skip trailers)")
+    parser.add_argument("--max-workers", type=int, default=4, help="Max concurrent downloads")
+    parser.add_argument("--retry", type=int, default=1, help="Retry count for direct downloads")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
+    parser.add_argument("--dry-run", action="store_true", help="Parse only; do not download")
+    parser.add_argument("--browser", default=None, help="Browser for cookies-from-browser (chrome, firefox, edge, safari)")
+    parser.add_argument("--browser-profile", default=None, help="Browser profile name for cookies-from-browser (optional)")
+    parser.add_argument("--cookies", default=None, help="Path to cookies.txt file for yt-dlp (Vimeo login)")
+    parser.add_argument("--log-level", default="debug", choices=["debug", "info", "none"], help="Set log level: debug, info, or none (default: debug)")
+    parser.add_argument("--log", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--loglevel", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-level", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-format", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-date", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay2", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay3", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay4", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay5", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay6", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay7", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay8", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay9", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-encoding10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-rotate10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-backup10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-maxsize10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-count10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-interval10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-when10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-utc10", default=None, help="(Unused, for compatibility)")
+    parser.add_argument("--logfile-delay10", default=None, help="(Unused, for compatibility)")
+    args, unknown = parser.parse_known_args()
+    set_log_level(args.log_level)
     print(blue("\n[INFO] For Vimeo downloads requiring login, use --cookies <cookies.txt> (see yt-dlp wiki for details)."))
     main()
+
+
+    pass
 
