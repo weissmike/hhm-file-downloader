@@ -1,3 +1,150 @@
+# Quick Start: Setting Up Python
+
+If you have never used Python before, follow these steps to get started:
+
+1. **Install Python 3.8 or higher:**
+  - Go to [python.org/downloads](https://www.python.org/downloads/) and download the latest version for your operating system (Windows or macOS).
+  - Run the installer. **On Windows, make sure to check the box that says "Add Python to PATH" before clicking Install.**
+  - After installation, open a new Command Prompt (Windows) or Terminal (macOS) and type:
+    ```
+    python --version
+    ```
+    You should see something like `Python 3.10.0` or higher.
+
+2. **Download the scripts:**
+  - Place all the `.py` files (`film_downloader.py`, `organize_assets.py`, `asset_auditor.py`, `utils.py`) and your CSV file in the same folder.
+
+3. **First Run:**
+  - Open a Command Prompt or Terminal in that folder.
+  - Run the script you want (see below). The script will automatically install any missing Python packages the first time you run it. You may see some installation messages—this is normal.
+
+---
+
+# Script Overview
+
+This toolkit includes three main scripts to help you manage, download, organize, and audit film festival assets. Each script is designed to be user-friendly and robust, even for beginners.
+
+## 1. film_downloader.py
+
+**Purpose:**
+- Downloads films, trailers, posters, and stills in bulk from a CSV file of links.
+- Organizes downloads by film name and asset type (Film, Posters, Stills, Trailer).
+- Skips files that are already downloaded or stubbed, and resumes partial downloads.
+- Generates a `download_report.csv` summarizing all download attempts.
+
+**How to use:**
+1. Prepare your CSV file with the required links.
+2. Open Command Prompt/Terminal in the script folder.
+3. Run:
+  ```
+  python film_downloader.py
+  ```
+  - The script will prompt you to select your CSV file, or you can use `--csv path/to/file.csv`.
+  - Downloads will be saved in a `downloads` folder (or as set in config).
+  - If you see errors about missing packages, just re-run the script after installation completes.
+
+**Features:**
+- Handles Google Drive, Dropbox, Vimeo, YouTube, direct links, and more.
+- Automatically resumes interrupted downloads and skips files that already exist or are stubbed.
+- Organizes files into subfolders by film and asset type.
+- Supports cookies for authenticated downloads (see below).
+
+## 2. organize_assets.py
+
+**Purpose:**
+- Sorts and organizes downloaded and unsorted files into a master folder structure for easy access.
+- Uses the same config as the downloader for consistent paths.
+- Moves files into `Features` and `Shorts` folders, with subfolders for each asset type.
+- Rebuilds aggregate folders (symlinks/shortcuts) for quick browsing.
+
+**How to use:**
+1. Place any loose or extra files in your `Unsorted` folder (see config).
+2. Run:
+  ```
+  python organize_assets.py
+  ```
+  - The script will read your config and organize everything into the correct structure.
+  - No files are deleted—everything is moved or stubbed for safety.
+
+**Features:**
+- Reads and updates `.film_downloader_config.json` for all paths.
+- Fuzzy-matches film names and asset types for robust sorting.
+- Logs all actions for transparency.
+
+## 3. asset_auditor.py
+
+**Purpose:**
+- Audits your organized asset folders to find missing, oversized, or misplaced files.
+- Generates a Markdown report and a draft email for follow-up.
+
+**How to use:**
+1. After organizing assets, run:
+  ```
+  python asset_auditor.py
+  ```
+  - The script will scan your folders and produce a report in Markdown format.
+  - It will also draft an email listing missing or problematic assets.
+
+**Features:**
+- Checks for missing, stubbed, or oversized files.
+- Summarizes issues in a human-readable report.
+- Helps you quickly identify what needs attention.
+
+## 4. create_drives.py
+
+**Purpose:**
+- Interactively builds a drive/folder structure for each festival showing, copying only the needed film assets for each block or feature.
+- For shorts blocks, copies the entire numbered subfolders (created by `organize_assets.py`) directly from `Shorts` to the output, preserving numbering and order.
+- For features or other films, copies the main film file as usual.
+- Supports dry-run mode to preview what would be created/copied.
+
+**How to use:**
+1. Run:
+   ```
+   python create_drives.py --output-root D:/Path/To/DriveRoot
+   ```
+   - Optionally add `--dry-run` to preview the folder/file tree without copying.
+   - You can also set `--assets-root` if your assets are not in the default location (from config).
+
+2. When prompted, paste a tab-delimited list of showings (one per line):
+   - Format: `Day<TAB>Time<TAB>Block or Film Name`
+   - Example:
+     ```
+     Friday	7:00 PM	Shorts 1
+     Friday	9:00 PM	Feature Film Title
+     Saturday	2:00 PM	Shorts 2
+     Saturday	4:00 PM	Another Feature
+     ```
+   - End input with an empty line.
+
+**Notes:**
+- For shorts blocks, the script will copy each numbered subfolder (e.g., `Shorts 1/01_FilmName`, `Shorts 1/02_FilmName`, etc.) into the output, preserving the order and folder names.
+- For features, the script will copy the main film file into the appropriate folder.
+- If a shorts block or film is missing, you will see an error message in the log.
+- If a destination folder already exists, it will be skipped (not overwritten).
+
+**Troubleshooting:**
+- If you see `[ERROR] Shorts block folder not found`, check that the block name matches exactly (including spaces/case) with the folder in `Shorts`.
+- If you see `[ERROR] No film file found` or `FileNotFoundError`, check that the film file exists in the expected location.
+- If you see a traceback with `shutil.copy2`, it means the source file was not found—double-check your asset folders and names.
+- Use `--dry-run` to preview the folder/file tree before actually copying files.
+
+---
+
+# Typical Workflow
+
+1. **Download new assets:**
+  - Run `film_downloader.py` to fetch new files into your downloads folder.
+2. **Organize everything:**
+  - Run `organize_assets.py` to sort all files into the master structure.
+3. **Audit your collection:**
+  - Run `asset_auditor.py` to check for missing or problematic files.
+4. **Create drive folders:**
+  - Run `create_drives.py` to build the folder structure for each showing.
+
+You can repeat these steps as needed. All scripts are safe to re-run—they will skip or stub files as appropriate.
+
+---
 # Film & Trailer Bulk Downloader
 
 ## Purpose
@@ -139,6 +286,47 @@ The `organize_assets.py` script uses the same configuration as the downloader to
 - **Tip:**
   - You can add or change these paths in the config file at any time to match your storage layout.
   - The organizer will always use the latest config values.
+
+---
+
+# ffprobe/ffmpeg Requirement for Asset Auditing
+
+To extract technical details (runtime, codecs, resolution, etc.) for video files, the `asset_auditor.py` script requires `ffprobe` (part of the free [ffmpeg](https://ffmpeg.org/) toolkit).
+
+**If you see only `N/A` for all fields except file size in your audit report, you need to install ffprobe.**
+
+## Windows: Step-by-Step ffprobe Installation
+
+1. **Download ffmpeg static build:**
+   - Go to the official [ffmpeg download page](https://ffmpeg.org/download.html).
+   - Under "Get packages & executable files", click the link for Windows builds (e.g., "Windows builds by Gyan").
+   - On the Gyan.dev page, under "Release builds", click the link for the latest "ffmpeg-release-essentials.zip".
+
+2. **Extract the ZIP file:**
+   - Right-click the downloaded ZIP and choose "Extract All...".
+   - Open the extracted folder. Inside, you'll find a `bin` folder containing `ffprobe.exe` and `ffmpeg.exe`.
+
+3. **Add ffmpeg/bin to your PATH:**
+   - Copy the full path to the `bin` folder (e.g., `C:\Users\yourname\Downloads\ffmpeg-release-essentials\bin`).
+   - Press `Win + X` and select **System** > **Advanced system settings** > **Environment Variables**.
+   - Under **System variables**, select `Path` and click **Edit**.
+   - Click **New** and paste the path to your `bin` folder.
+   - Click **OK** to save and close all dialogs.
+
+4. **Verify installation:**
+   - Open a new Command Prompt (important: must be a new window).
+   - Type:
+     ```
+     ffprobe -version
+     ```
+   - If you see version info, ffprobe is installed and ready to use.
+   - If you see "not recognized", double-check that you added the correct `bin` path and opened a new terminal.
+
+## macOS/Linux
+- Install via Homebrew: `brew install ffmpeg`
+- Or use your package manager: `sudo apt install ffmpeg` (Linux)
+
+After installing, re-run `asset_auditor.py` to get full technical details in your Markdown report.
 
 ---
 

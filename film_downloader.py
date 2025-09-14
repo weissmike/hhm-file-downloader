@@ -1,3 +1,9 @@
+ASSET_TYPE_FOLDERS = {
+    'film': 'Film',
+    'poster': 'Posters',
+    'still': 'Stills',
+    'trailer': 'Trailer',
+}
 #!/usr/bin/env python3
 
 import sys
@@ -168,10 +174,10 @@ def normalize_header(h):
 
 def classify_column(header):
     h = normalize_header(header)
-    if any(k in h for k in FILM_KEYWORDS): return "film"
-    if any(k in h for k in TRAILER_KEYWORDS): return "trailer"
-    if any(k in h for k in STILLS_KEYWORDS): return "stills"
-    if any(k in h for k in POSTER_KEYWORDS): return "poster"
+    if any(k in h for k in FILM_KEYWORDS): return "Film"
+    if any(k in h for k in TRAILER_KEYWORDS): return "Trailer"
+    if any(k in h for k in STILLS_KEYWORDS): return "Stills"
+    if any(k in h for k in POSTER_KEYWORDS): return "Posters"
     return "other"
 
 def extract_urls(cell):
@@ -427,7 +433,7 @@ def _write_stream(resp, path):
 ######################################################################
 
 def determine_asset_type(col_class, header_text, url):
-    if col_class in ("film", "trailer", "stills", "poster"):
+    if col_class in ("Film", "Trailer", "Stills", "Posters"):
         return col_class
     h = normalize_header(header_text)
     if any(k in h for k in FILM_KEYWORDS): return "film"
@@ -439,10 +445,10 @@ def determine_asset_type(col_class, header_text, url):
     return "other"
 
 def should_include(asset_type):
-    if asset_type == "film": return True
-    if asset_type == "trailer" and not ARGS.films_only: return True
-    if asset_type == "stills" and ARGS.include_stills: return True
-    if asset_type == "poster" and ARGS.include_poster: return True
+    if asset_type == "Film": return True
+    if asset_type == "Trailer" and not ARGS.films_only: return True
+    if asset_type == "Stills" and ARGS.include_stills: return True
+    if asset_type == "Posters" and ARGS.include_poster: return True
     if ARGS.include_all_http: return True
     return False
 
@@ -524,7 +530,9 @@ def main():
     def worker(job, tqdm_position):
         nonlocal counter
         film_dir_name = safe_filename(job["film_name"]) or f"Film_{job['row_index']}"
-        dest_dir = os.path.join(ARGS.out, film_dir_name, job["asset_type"])
+        # Always use canonical asset folder; fallback to 'Film' if unknown
+        canonical_folder = ASSET_TYPE_FOLDERS.get(job["asset_type"].lower(), 'Film')
+        dest_dir = os.path.join(ARGS.out, film_dir_name, canonical_folder)
         os.makedirs(dest_dir, exist_ok=True)
 
         raw_url = job["url"].strip()
@@ -545,7 +553,8 @@ def main():
         out_path = os.path.join(dest_dir, base_file_name + ext)
         log_debug(f"base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'")
 
-        # Check if file already exists and is complete BEFORE any download attempt
+
+        # Check if file already exists, is complete, or a stub exists BEFORE any download attempt
         skip = False
         local_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
         remote_size = None
@@ -569,52 +578,75 @@ def main():
             return name
 
         base_stripped = strip_all_ext(base_file_name)
+        # Normalize all filenames for matching (case-insensitive, extension-insensitive)
+        def normalize_for_match(path):
+            # Lowercase, remove all extensions
+            name = os.path.basename(path).lower()
+            while True:
+                root, ext = os.path.splitext(name)
+                if ext:
+                    name = root
+                else:
+                    break
+            return name
+
+        out_norm = normalize_for_match(out_path)
+        stub_found = False
         for fname in dir_files:
             candidate_path = os.path.join(base_dir, fname)
-            candidate_stripped = strip_all_ext(fname)
-            log_debug(f"Checking candidate: '{fname}', stripped: '{candidate_stripped}' vs base_stripped: '{base_stripped}'")
-            if candidate_stripped == base_stripped:
-                if fname.endswith('.part'):
-                    found_part = True
-                    part_path = candidate_path
-                    log_debug(f"Found .part file: '{candidate_path}' (will resume)")
-                else:
-                    candidate_size = os.path.getsize(candidate_path)
-                    log_debug(f"Found candidate: '{candidate_path}' ({candidate_size} bytes)")
-                    # Consider 'large' as >10MB (10*1024*1024)
-                    if candidate_size > 10*1024*1024:
-                        found_completed = True
-                        completed_path = candidate_path
-                        completed_size = candidate_size
-        if found_part:
-            log_debug(f"Resume enabled: .part file exists at '{part_path}'")
-            skip = False
-        elif found_completed:
-            log_debug(f"Found completed file: '{completed_path}' ({completed_size} bytes)")
+            candidate_norm = normalize_for_match(fname)
+            if candidate_norm == out_norm and fname.lower().endswith('.stub'):
+                log_debug(f"Stub file exists for {out_path} (matched: {fname}), skipping download.")
+                stub_found = True
+                break
+        if stub_found:
             skip = True
-        # For direct, if not found, check remote size if file exists at out_path
-        if not skip:
-            if os.path.exists(out_path) and local_size > 0:
-                log_debug(f"Found file: '{out_path}' ({local_size} bytes)")
-                if strategy == "direct":
-                    try:
-                        head = requests.head(raw_url, allow_redirects=True, timeout=10)
-                        if head.status_code == 200:
-                            remote_size = int(head.headers.get("content-length", "0") or 0)
-                    except Exception:
-                        pass
-                    if remote_size and local_size == remote_size:
-                        skip = True
-            else:
-                log_debug(f"Not found: '{out_path}'")
+        else:
+            for fname in dir_files:
+                candidate_path = os.path.join(base_dir, fname)
+                candidate_norm = normalize_for_match(fname)
+                if candidate_norm == out_norm:
+                    if fname.endswith('.part'):
+                        found_part = True
+                        part_path = candidate_path
+                        log_debug(f"Found .part file: '{candidate_path}' (will resume)")
+                    else:
+                        candidate_size = os.path.getsize(candidate_path)
+                        log_debug(f"Found candidate: '{candidate_path}' ({candidate_size} bytes)")
+                        # Consider 'large' as >10MB (10*1024*1024)
+                        if candidate_size > 10*1024*1024:
+                            found_completed = True
+                            completed_path = candidate_path
+                            completed_size = candidate_size
+            if found_part:
+                log_debug(f"Resume enabled: .part file exists at '{part_path}'")
+                skip = False
+            elif found_completed:
+                log_debug(f"Found completed file: '{completed_path}' ({completed_size} bytes)")
+                skip = True
+            # For direct, if not found, check remote size if file exists at out_path
+            if not skip:
+                if os.path.exists(out_path) and local_size > 0:
+                    log_debug(f"Found file: '{out_path}' ({local_size} bytes)")
+                    if strategy == "direct":
+                        try:
+                            head = requests.head(raw_url, allow_redirects=True, timeout=10)
+                            if head.status_code == 200:
+                                remote_size = int(head.headers.get("content-length", "0") or 0)
+                        except Exception:
+                            pass
+                        if remote_size and local_size == remote_size:
+                            skip = True
+                else:
+                    log_debug(f"Not found: '{out_path}'")
 
         final_path = completed_path if found_completed else out_path
         if skip:
             status = "SKIPPED"
-            detail = f"File already exists. Local size: {completed_size if found_completed else local_size} bytes. Remote size: {remote_size if remote_size is not None else 'unknown'} bytes."
+            detail = f"File already exists or stub present. Local size: {completed_size if found_completed else local_size} bytes. Remote size: {remote_size if remote_size is not None else 'unknown'} bytes."
             # Only print skip line if log-level is debug
             if globals().get('LOG_LEVEL', 'debug') == "debug":
-                log_info(f"[SKIP] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)} | Local: {completed_size if found_completed else local_size} | Remote: {remote_size if remote_size is not None else 'unknown'}")
+                log_info(f"[SKIP] {job['asset_type']} | {job['film_name']} -> {os.path.basename(final_path)} | Local: {completed_size if found_completed else local_size} | Remote: {remote_size if remote_size is not None else 'unknown'} | Stub found: {stub_found}")
             report_rows.append({
                 "row_index": job["row_index"],
                 "film_name": job["film_name"],
