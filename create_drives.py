@@ -25,15 +25,28 @@ def load_config():
 
 from utils import fuzzy_match_title
 def find_asset(film_name, assets_root, all_titles=None, threshold=0.8):
+    import unicodedata
     video_exts = {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.mpg', '.mpeg', '.webm'}
-    # Try exact match first
+    def normalize(s):
+        return unicodedata.normalize('NFKC', s).strip().casefold()
+    # Try robust exact match first
     for sub in ['Features', 'Shorts']:
         folder = Path(assets_root) / sub
         if not folder.exists():
             continue
-        for f in folder.glob(f"**/{film_name}/*"):
-            if f.is_file() and not f.name.endswith('.stub') and f.suffix.lower() in video_exts:
-                return f
+        for d in folder.iterdir():
+            if d.is_dir():
+                log_debug(f"Checking folder: {d.name}")
+                if normalize(d.name) == normalize(film_name):
+                    # Look for a main film file in this folder or its Film subfolder
+                    candidates = []
+                    for search_dir in [d, d / 'Film']:
+                        if search_dir.exists():
+                            for f in search_dir.iterdir():
+                                if f.is_file() and not f.name.endswith('.stub') and f.suffix.lower() in video_exts:
+                                    candidates.append(f)
+                    if candidates:
+                        return candidates[0]  # Return the first found
     # Fuzzy match if not found
     if all_titles:
         best_match, score = fuzzy_match_title(film_name, all_titles, threshold=threshold)
@@ -42,10 +55,17 @@ def find_asset(film_name, assets_root, all_titles=None, threshold=0.8):
                 folder = Path(assets_root) / sub
                 if not folder.exists():
                     continue
-                for f in folder.glob(f"**/{best_match}/*"):
-                    if f.is_file() and not f.name.endswith('.stub') and f.suffix.lower() in video_exts:
-                        log_info(f"[FUZZY MATCH] '{film_name}' matched to '{best_match}' (score {int(score*100)}%)")
-                        return f
+                for d in folder.iterdir():
+                    if d.is_dir() and normalize(d.name) == normalize(best_match):
+                        candidates = []
+                        for search_dir in [d, d / 'Film']:
+                            if search_dir.exists():
+                                for f in search_dir.iterdir():
+                                    if f.is_file() and not f.name.endswith('.stub') and f.suffix.lower() in video_exts:
+                                        candidates.append(f)
+                        if candidates:
+                            log_info(f"[FUZZY MATCH] '{film_name}' matched to '{best_match}' (score {int(score*100)}%)")
+                            return candidates[0]
     return None
 
 def copy_asset(src, dest, dry_run=False):
@@ -55,7 +75,29 @@ def copy_asset(src, dest, dry_run=False):
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         return  # Don't overwrite
-    shutil.copy2(src, dest)
+    try:
+        file_size = os.path.getsize(src)
+        threshold = 100 * 1024 * 1024  # 100MB
+        if file_size > threshold:
+            try:
+                from tqdm import tqdm
+            except ImportError:
+                log_info("tqdm not installed, copying without progress bar.")
+                shutil.copy2(src, dest)
+                return
+            chunk_size = 4 * 1024 * 1024  # 4MB
+            with open(src, 'rb') as fsrc, open(dest, 'wb') as fdst, tqdm(total=file_size, unit='B', unit_scale=True, desc=f"Copying {os.path.basename(src)}") as pbar:
+                while True:
+                    buf = fsrc.read(chunk_size)
+                    if not buf:
+                        break
+                    fdst.write(buf)
+                    pbar.update(len(buf))
+            shutil.copystat(src, dest)
+        else:
+            shutil.copy2(src, dest)
+    except Exception as e:
+        log_error(f"Error copying file {src} to {dest}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive: Organize assets for showings/blocks pasted by user.")
@@ -133,9 +175,12 @@ def main():
                             all_titles.add(d.name)
             all_titles = list(all_titles)
             asset = find_asset(name, assets_root, all_titles=all_titles)
+            log_debug(f"find_asset('{name}') returned: {asset}")
             dest = show_dir / (asset.name if asset else f"{name} (NOT FOUND)")
             if asset:
                 copy_asset(asset, dest, dry_run=args.dry_run)
+            else:
+                log_error(f"[FEATURE NOT FOUND] '{name}' not matched.")
             if args.dry_run:
                 dry_run_paths.add(dest)
 
