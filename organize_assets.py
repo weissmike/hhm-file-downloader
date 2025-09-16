@@ -591,8 +591,13 @@ if __name__ == '__main__':
     # --- Organize Shorts into block subfolders by play order ---
     from collections import defaultdict
     shorts_dir = SHORTS
-    # Map short title to its canonical folder
-    short_to_dir = {t: shorts_dir / sanitize(t) for t in SHORT_TITLES}
+    # Normalization for robust matching (dashes, underscores, spaces, case)
+    def norm_title(s):
+        return ''.join(c if c.isalnum() else ' ' for c in s).lower().split()
+    def norm_key(s):
+        return ' '.join(norm_title(s))
+    # Map normalized short title to canonical folder
+    short_to_dir = {norm_key(t): shorts_dir / sanitize(t) for t in SHORT_TITLES}
     # Track which shorts are sorted into blocks
     sorted_shorts = set()
     # For each block, create a subfolder and move shorts in order
@@ -601,16 +606,30 @@ if __name__ == '__main__':
         block_folder = shorts_dir / block
         block_folder.mkdir(exist_ok=True)
         for idx, short_title in enumerate(shorts_list, 1):
+            # Normalize for robust matching
+            norm_short_title = norm_key(short_title)
             # Use file_match_threshold from config
-            match, score = fuzzy_match_title(short_title, list(short_to_dir.keys()), threshold=FILE_MATCH_THRESHOLD)
+            match, score = fuzzy_match_title(norm_short_title, list(short_to_dir.keys()), threshold=FILE_MATCH_THRESHOLD)
             src_dir = short_to_dir.get(match) if match else None
             dest_dir = block_folder / f"{idx:02d}_{sanitize(short_title)}"
             if src_dir and src_dir.exists():
-                # Move all asset subfolders/files into block subfolder, prefix with order
+                # Move or merge all asset subfolders/files into block subfolder
                 if not dest_dir.exists():
                     shutil.move(str(src_dir), str(dest_dir))
                 else:
-                    log_info(f"Block dest already exists: {dest_dir}")
+                    # Merge: copy any new or updated files/subfolders from src_dir to dest_dir
+                    for item in src_dir.iterdir():
+                        dest_item = dest_dir / item.name
+                        if item.is_dir():
+                            dest_item.mkdir(exist_ok=True)
+                            for f in item.iterdir():
+                                dest_f = dest_item / f.name
+                                if not dest_f.exists() or (f.is_file() and f.stat().st_mtime > dest_f.stat().st_mtime):
+                                    shutil.copy2(str(f), str(dest_f))
+                        else:
+                            if not dest_item.exists() or (item.is_file() and item.stat().st_mtime > dest_item.stat().st_mtime):
+                                shutil.copy2(str(item), str(dest_item))
+                    log_info(f"Block dest already exists: {dest_dir} — merged new/updated assets.")
                 sorted_shorts.add(match)
             else:
                 # Create empty placeholder folder for missing short
@@ -618,7 +637,7 @@ if __name__ == '__main__':
                     dest_dir.mkdir(parents=True, exist_ok=True)
                 log_info(f"[BLOCK PLACEHOLDER] No assets found for short '{short_title}' in block '{block}'. Created empty folder: {dest_dir}")
     # Log any shorts that were not sorted into a block
-    unsorted_shorts = [t for t in SHORT_TITLES if (short_to_dir[t].exists() and t not in sorted_shorts)]
+    unsorted_shorts = [t for t in SHORT_TITLES if (short_to_dir.get(norm_key(t)) and short_to_dir[norm_key(t)].exists() and norm_key(t) not in sorted_shorts)]
     if unsorted_shorts:
         log_info(f"Shorts not sorted into any block: {unsorted_shorts}")
     # Organize dumped files
