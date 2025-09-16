@@ -242,8 +242,17 @@ def main():
                             film_files = [f for f in film_dir.iterdir() if f.is_file() and f.suffix.lower() in {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.mpg', '.mpeg', '.webm'}]
                             for film_file in film_files:
                                 dest = show_dir / f"{numbered_short.name}_{film_file.name}"
-                                log_info(f"Copying short: {film_file} -> {dest}")
-                                copy_with_progress(film_file, dest)
+                                if dest.exists():
+                                    src_size = film_file.stat().st_size
+                                    dest_size = dest.stat().st_size
+                                    if src_size > dest_size:
+                                        log_info(f"OVERWRITE (src larger): {film_file} ({src_size}) -> {dest} ({dest_size})")
+                                        copy_with_progress(film_file, dest)
+                                    else:
+                                        log_info(f"SKIP (already exists, same or larger): {film_file} ({src_size}) -> {dest} ({dest_size})")
+                                else:
+                                    log_info(f"Copying short: {film_file} -> {dest}")
+                                    copy_with_progress(film_file, dest)
                         else:
                             log_error(f"No Film subfolder in {numbered_short}")
             else:
@@ -260,8 +269,17 @@ def main():
             asset = find_asset(name, assets_root, all_titles=all_titles)
             dest = show_dir / (asset.name if asset else f"{name} (NOT FOUND)")
             if asset:
-                log_info(f"Copying feature: {asset} -> {dest}")
-                copy_with_progress(asset, dest)
+                if dest.exists():
+                    src_size = asset.stat().st_size
+                    dest_size = dest.stat().st_size
+                    if src_size > dest_size:
+                        log_info(f"OVERWRITE (src larger): {asset} ({src_size}) -> {dest} ({dest_size})")
+                        copy_with_progress(asset, dest)
+                    else:
+                        log_info(f"SKIP (already exists, same or larger): {asset} ({src_size}) -> {dest} ({dest_size})")
+                else:
+                    log_info(f"Copying feature: {asset} -> {dest}")
+                    copy_with_progress(asset, dest)
             else:
                 log_error(f"[FEATURE NOT FOUND] '{name}' not matched.")
 
@@ -291,143 +309,6 @@ def main():
         audit_assets(assets_root, str(audit_path), film_titles=final_film_list, log_level=args.log_level)
     except Exception as e:
         log_error(f"Failed to generate audit report: {e}")
-
-
-    # Copy Sponsors and all aggregate folders (starting with _) to output root
-    def copytree(src, dst, dry_run=False):
-        for item in src.iterdir():
-            s = src / item.name
-            d = dst / item.name
-            if s.is_dir():
-                if dry_run:
-                    dry_run_paths.add(d)
-                else:
-                    d.mkdir(parents=True, exist_ok=True)
-                copytree(s, d, dry_run)
-            else:
-                if dry_run:
-                    dry_run_paths.add(d)
-                else:
-                    d.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(s, d)
-
-    def copy_missing(src, dst):
-        """Recursively copy all files/folders from src to dst, skipping files that already exist."""
-        dst.mkdir(parents=True, exist_ok=True)
-        for item in src.iterdir():
-            s = src / item.name
-            d = dst / item.name
-            if s.is_dir():
-                copy_missing(s, d)
-            else:
-                if not d.exists():
-                    shutil.copy2(s, d)
-
-    sponsors_src = Path(assets_root) / 'Sponsors'
-    sponsors_dst = Path(args.output_root) / 'Sponsors'
-    if sponsors_src.exists() and sponsors_src.is_dir():
-        log_info(f"Ensuring all Sponsors assets exist in {sponsors_dst}")
-        copy_missing(sponsors_src, sponsors_dst)
-    else:
-        log_info("No Sponsors folder found to copy.")
-
-    trailers_src = Path(assets_root) / '_Trailers'
-    trailers_dst = Path(args.output_root) / '_Trailers'
-    if trailers_src.exists() and trailers_src.is_dir():
-        log_info(f"Ensuring all _Trailers assets exist in {trailers_dst}")
-        copy_missing(trailers_src, trailers_dst)
-    else:
-        log_info("No _Trailers folder found to copy.")
-
-    print("Paste your showings (tab-delimited: Day<TAB>Time<TAB>Block/Film Name), one per line. End with an empty line:")
-    showings = []
-    while True:
-        line = input()
-        if not line.strip():
-            break
-        parts = line.split('\t')
-        if len(parts) < 3:
-            print("Invalid line, must have Day, Time, Block/Film Name (tab-delimited). Skipping.")
-            continue
-        day, time, title = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if not title:
-            # Ignore blank titles (unused blocks)
-            continue
-        showings.append((day, time, title))
-
-    if not showings:
-        print("No showings entered. Exiting.")
-        return
-
-    dry_run_paths = set()
-    shorts_dir = Path(assets_root) / 'Shorts'
-    # Track films/shorts copied for each showing (for venue-specific audit)
-    showing_to_films = []  # List of (show_dir, [film names])
-    for day, time, name in showings:
-        def sanitize(s):
-            return ''.join(c if c not in '<>:"/\\|?*' else '-' for c in s)
-        safe_time = sanitize(time)
-        safe_name = sanitize(name)
-        show_folder = f"{day}\\{safe_time} - {safe_name}"
-
-    show_dir = Path(args.output_root) / show_folder
-    show_dir.mkdir(parents=True, exist_ok=True)
-    films_for_this_showing = []
-    if 'shorts' in name.lower():
-            # Copy only the main film file from each numbered block subfolder
-            block_folder = shorts_dir / name
-            if block_folder.exists() and block_folder.is_dir():
-                for numbered_short in sorted(block_folder.iterdir()):
-                    if numbered_short.is_dir():
-                        # Look for the main film file in the 'Film' subfolder
-                        film_dir = numbered_short / 'Film'
-                        if film_dir.exists() and film_dir.is_dir():
-                            film_files = [f for f in film_dir.iterdir() if f.is_file() and f.suffix.lower() in {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.mpg', '.mpeg', '.webm'}]
-                            if film_files:
-                                film_file = film_files[0]  # Take the first film file found
-                                dest = show_dir / f"{numbered_short.name}_{film_file.name}"
-                                if args.dry_run:
-                                    dry_run_paths.add(dest)
-                                else:
-                                    shutil.copy2(film_file, dest)
-                                films_for_this_showing.append(numbered_short.name)
-                            else:
-                                log_error(f"No film file found in {film_dir}")
-                        else:
-                            log_error(f"No Film subfolder in {numbered_short}")
-            else:
-                log_error(f"Shorts block folder not found: {block_folder}")
-    else:
-            # Feature or other film: copy as before
-            all_titles = set()
-            for sub in ['Features', 'Shorts']:
-                folder = Path(assets_root) / sub
-                if folder.exists():
-                    for d in folder.iterdir():
-                        if d.is_dir():
-                            all_titles.add(d.name)
-            all_titles = list(all_titles)
-            asset = find_asset(name, assets_root, all_titles=all_titles)
-            log_debug(f"find_asset('{name}') returned: {asset}")
-            dest = show_dir / (asset.name if asset else f"{name} (NOT FOUND)")
-            if asset:
-                copy_asset(asset, dest, dry_run=args.dry_run)
-                films_for_this_showing.append(name)
-            else:
-                log_error(f"[FEATURE NOT FOUND] '{name}' not matched.")
-            if args.dry_run:
-                dry_run_paths.add(dest)
-    # Track films/shorts for this showing for later audit
-    showing_to_films.append((show_dir, films_for_this_showing))
-
-    log_info("Drive/folder creation complete.")
-
-    # --- After all copying, run asset audit for each showing ---
-    for show_dir, film_list in showing_to_films:
-        if film_list:
-            audit_report_path = Path(show_dir) / "asset_audit_report.md"
-            log_info(f"Auditing assets for {show_dir} (films: {film_list}) -> {audit_report_path}")
-            audit_assets(assets_root, str(audit_report_path), film_titles=film_list, log_level=args.log_level)
 
     # --- Print dry-run tree summary at the very end ---
     if args.dry_run:

@@ -539,25 +539,20 @@ def rebuild_aggregates():
         for parent in [FEATURES, SHORTS]:
             for film_dir in parent.iterdir():
                 if film_dir.is_dir():
-                    # Use correct folder name: plural for Stills/Posters, singular for Film/Trailer
-                    if agg in ['Stills', 'Posters']:
-                        asset_dir = film_dir / agg
-                    elif agg == 'Films':
-                        asset_dir = film_dir / 'Film'
-                    elif agg == 'Trailers':
-                        asset_dir = film_dir / 'Trailer'
-                    else:
-                        asset_dir = film_dir / agg
-                    if not asset_dir.exists():
-                        continue
-                    for asset in asset_dir.iterdir():
-                        if asset.is_file():
-                            link_name = f"{film_dir.name} - {asset.name}"
-                            link_path = agg_path / link_name
-                            try:
-                                link_path.symlink_to(asset.resolve())
-                            except Exception as e:
-                                log_error(f"Failed to symlink {asset} to {link_path}: {e}")
+                    target_folder = agg.rstrip('s').lower()
+                    # Recursively find all folders named exactly as the asset type, at any depth
+                    for subdir, dirs, files in os.walk(film_dir):
+                        subdir_path = Path(subdir)
+                        if subdir_path.name.lower() == target_folder:
+                            for asset in subdir_path.iterdir():
+                                if asset.is_file():
+                                    # Use the immediate parent folder (the asset type folder) for context, not just the film_dir
+                                    link_name = f"{film_dir.name} - {asset.name}"
+                                    link_path = agg_path / link_name
+                                    try:
+                                        link_path.symlink_to(asset.resolve())
+                                    except Exception as e:
+                                        log_error(f"Failed to symlink {asset} to {link_path}: {e}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Organize film assets with fuzzy matching and dry-run support.")

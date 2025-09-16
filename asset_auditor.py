@@ -60,7 +60,145 @@ def set_log_level(level):
     pass
 
 def check_concerns(details):
-    return {}, []
+    """
+    Returns (concerns_dict, summary_list):
+    - concerns_dict: {field: True} for any field that is concerning
+    - summary_list: [messages] for summary section
+    """
+    concerns = {}
+    summary = []
+    # Example rules (customize as needed for your festival):
+    # - Resolution < 1920x1080
+    # - Aspect Ratio not 16:9, 1.85:1, or 2.39:1
+    # - Format not mov/mp4/mkv
+    # - Video Codec not h264/prores
+    # - Audio Codec not AAC/PCM
+    # - Channels < 2
+    # - Bitrate < 10 Mbps
+    # - Frame Rate < 23.97 or > 60
+    # - Runtime > 180 min or < 1 min
+    # - Size < 2GB
+    res = details.get('Resolution', '')
+    if res and 'x' in res:
+        try:
+            w, h = [int(x) for x in res.split('x')]
+            if w != 1920 or h != 1080:
+                concerns['Resolution'] = True
+                summary.append(f"Non-1080p resolution: {w}x{h}")
+        except Exception:
+            pass
+    aspect = details.get('Aspect Ratio', '')
+    # Acceptable aspect ratios (as floats and strings)
+    allowed_ratios = {
+        '16:9': 16/9,
+        '1.85:1': 1.85,
+        '2.39:1': 2.39,
+        '2.40:1': 2.40,
+        '1.78:1': 1.78,
+        '4:3': 4/3,
+        '1.33:1': 1.33
+    }
+    def aspect_str_to_float(val):
+        if not val or val == 'N/A':
+            return None
+        if ':' in val:
+            try:
+                num, denom = val.split(':')
+                return float(num) / float(denom)
+            except Exception:
+                return None
+        try:
+            return float(val)
+        except Exception:
+            return None
+    aspect_ok = False
+    if aspect:
+        # Accept if exact string match
+        if aspect in allowed_ratios:
+            aspect_ok = True
+        else:
+            # Accept if float value is close to any allowed
+            aspect_val = aspect_str_to_float(aspect)
+            if aspect_val:
+                for allowed in allowed_ratios.values():
+                    if abs(aspect_val - allowed) < 0.02:
+                        aspect_ok = True
+                        break
+    if aspect and not aspect_ok:
+        concerns['Aspect Ratio'] = True
+        summary.append(f"Unusual aspect ratio: {aspect}")
+    fmt = details.get('Format', '').lower()
+    # Do not flag yuv420p
+    if fmt and not any(x in fmt for x in ['yuv420p', 'mov', 'mp4', 'mkv']):
+        concerns['Format'] = True
+        summary.append(f"Unusual format: {fmt}")
+    vcodec = details.get('Video Codec', '').lower()
+    if vcodec and not any(x in vcodec for x in ['h264']):
+        concerns['Video Codec'] = True
+        summary.append(f"Unusual video codec: {vcodec}")
+    acodec = details.get('Audio Codec', '').lower()
+    if acodec and not any(x in acodec for x in ['aac', 'pcm']):
+        concerns['Audio Codec'] = True
+        summary.append(f"Unusual audio codec: {acodec}")
+    # Sound (Channels): flag if not 2.0 or 5.1
+    sound = details.get('Sound', '')
+    if sound not in {'2.0', '5.1'}:
+        concerns['Sound'] = True
+        summary.append(f"Unusual audio channel count: {sound}")
+    # Bitrate: flag if <4 Mbps or >20 Mbps
+    try:
+        br = float(details.get('Bitrate', 0))
+        if br and (br < 4_000_000 or br > 20_000_000):
+            concerns['Bitrate'] = True
+            summary.append(f"Unusual bitrate: {br}")
+    except Exception:
+        pass
+    # Frame Rate: flag if <23.5 or >60
+    try:
+        fr = float(details.get('Frame Rate', 0))
+        if fr and (fr < 23.5 or fr > 60):
+            concerns['Frame Rate'] = True
+            summary.append(f"Unusual frame rate: {fr}")
+    except Exception:
+        pass
+    # Runtime: flag if <1 or >180 min
+    try:
+        rt = float(details.get('Runtime', 0))
+        if rt and (rt < 1 or rt > 180):
+            concerns['Runtime'] = True
+            summary.append(f"Unusual runtime: {rt} min")
+    except Exception:
+        pass
+    # File size: flag if <.7GB or >10GB
+    try:
+        sz = float(details.get('Size (GB)', 0))
+        if sz and (sz < .7 or sz > 10):
+            concerns['Size (GB)'] = True
+            summary.append(f"Unusual file size: {sz} GB")
+    except Exception:
+        pass
+    # 5.1 mapping: SMPTE is standard for DCP/festival; flag Film/ITU mapping if detected
+    # (ffprobe does not provide channel layout by default; if available, check details['Channel Layout'])
+    ch_layout = details.get('Channel Layout', '').lower()
+    if sound == '5.1':
+        # SMPTE: L R C LFE Ls Rs; Film/ITU: L C R LFE Ls Rs
+        # If channel layout is available, check for SMPTE order
+        if ch_layout:
+            smpte = ['l', 'r', 'c', 'lfe', 'ls', 'rs']
+            film = ['l', 'c', 'r', 'lfe', 'ls', 'rs']
+            layout = [x.strip() for x in ch_layout.replace('(', '').replace(')', '').replace('/', ' ').replace(',', ' ').split() if x.strip()]
+            if layout[:6] == smpte:
+                pass  # OK
+            elif layout[:6] == film:
+                concerns['Sound Standard'] = True
+                summary.append("5.1 channel order is Film/ITU (not SMPTE)")
+            else:
+                concerns['Sound Standard'] = True
+                summary.append(f"5.1 channel order is nonstandard: {ch_layout}")
+        else:
+            # If channel layout is not available, cannot determine mapping
+            summary.append("5.1 audio: channel mapping unknown (cannot verify SMPTE vs Film order)")
+    return concerns, summary
 from pathlib import Path
 
 def get_file_details(file_path):
@@ -169,15 +307,6 @@ def generate_report(films, out_path, include_titles=None):
             for film in missing_main:
                 f.write(f"- {film}\n")
             f.write("\n")
-        if caution_films:
-            f.write("## Films With Technical Cautions\n\n")
-            for film in caution_films:
-                f.write(f"- {film}")
-                if film_cautions.get(film):
-                    f.write(": ")
-                    f.write('; '.join(film_cautions[film]))
-                f.write("\n")
-            f.write("\n")
 
         # --- Asset Counts Table ---
         f.write("## Asset Counts Table\n\n")
@@ -193,8 +322,23 @@ def generate_report(films, out_path, include_titles=None):
 
         # --- Tech Specs Table ---
         f.write("\n## Main Film File Technical Specs\n\n")
+        # Legend for allowed values/ranges
+        f.write(
+            "**Legend: Allowed/Recommended Values**\n\n"
+            "- Resolution: 1920x1080 (1080p)\n"
+            "- Aspect Ratio: 16:9, 1.85:1, 2.39:1, 2.40:1, 1.78:1\n"
+            "- Format: yuv420p, mov, mp4, mkv\n"
+            "- Video Codec: h264\n"
+            "- Audio Codec: aac, pcm\n"
+            "- Channels: 2.0 (Stereo), 5.1 (Surround)\n"
+            "- Sound Standard: SMPTE (for 5.1), Stereo (for 2.0)\n"
+            "- Bitrate: 4–20 Mbps\n"
+            "- Frame Rate: 23.98–30.00 fps (acceptable: 23.5–60)\n"
+            "- Runtime: 1–180 min\n"
+            "- Size (GB): 0.7–10 GB\n\n"
+        )
         tech_fields = [
-            'Resolution', 'Aspect Ratio', 'Format', 'Video Codec', 'Audio Codec', 'Sound (Channels)', 'Sound Standard', 'Bitrate', 'Frame Rate', 'Runtime', 'Size (GB)'
+            'Resolution', 'Aspect Ratio', 'Format', 'Video Codec', 'Audio Codec', 'Channels', 'Sound Standard', 'Bitrate', 'Frame Rate', 'Runtime', 'Size (GB)'
         ]
         f.write("| Film | " + " | ".join(tech_fields) + " |\n")
         f.write("|------|" + "------|" * len(tech_fields) + "\n")
@@ -208,9 +352,29 @@ def generate_report(films, out_path, include_titles=None):
                 concerns, _ = check_concerns(details)
                 # Sound (Channels)
                 sound_channels = details.get('Sound', 'N/A')
-                # Sound Standard (simple logic: AAC or PCM = Standard, else Non-Standard)
-                audio_codec = details.get('Audio Codec', '').lower()
-                sound_standard = 'Standard' if audio_codec in ('aac', 'pcm_s24le', 'pcm_s16le', 'pcm') else ('Non-Standard' if audio_codec else 'N/A')
+                # Sound Standard: show detected mapping or layout
+                sound_standard = 'N/A'
+                ch_layout = details.get('Channel Layout', '').lower()
+                sound = details.get('Sound', 'N/A')
+                if sound == '5.1':
+                    if ch_layout:
+                        smpte = ['l', 'r', 'c', 'lfe', 'ls', 'rs']
+                        film = ['l', 'c', 'r', 'lfe', 'ls', 'rs']
+                        layout = [x.strip() for x in ch_layout.replace('(', '').replace(')', '').replace('/', ' ').replace(',', ' ').split() if x.strip()]
+                        if layout[:6] == smpte:
+                            sound_standard = 'SMPTE'
+                        elif layout[:6] == film:
+                            sound_standard = 'Film/ITU'
+                        else:
+                            sound_standard = ch_layout
+                    else:
+                        sound_standard = 'Unknown'
+                elif sound == '2.0':
+                    sound_standard = 'Stereo'
+                elif sound != 'N/A':
+                    sound_standard = f"{sound}ch"
+                else:
+                    sound_standard = 'N/A'
                 # Bitrate (Mbps, rounded)
                 try:
                     br = float(details.get('Bitrate', 0))
@@ -419,7 +583,12 @@ def audit_assets(root_dir, out_path, film_titles=None, csv_path=None, log_level=
 
 def load_config():
 
-    pass
+    CONFIG_FILE = '.film_downloader_config.json'
+    import os, json
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
 
 # --- Acceptance CSV parsing helper ---
 def parse_acceptance_csv(path):
