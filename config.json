@@ -1,0 +1,14 @@
+{
+  "TRAILERS_DIR": "_Trailers",
+  "PROMOS_DIR": "_Promos",
+  "BUMPER_DIR": "_Bumpers",
+  "SPONSORS_DIR": "_Sponsors",
+  "GAP_FILE": "3sec.mov",
+  "STEP_REPEAT_FILE": "StepAndRepeat.png",
+  "FILMS_DIR": "_Films",
+  "root_dir": "D:/HHM",
+  "download_dir": "D:/HHM/downloads",
+  "unsorted_dir": "D:/HHM/Unsorted",
+  "dir_match_threshold": 0.5,
+  "file_match_threshold": 0.4
+}

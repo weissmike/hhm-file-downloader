@@ -7,7 +7,7 @@ import argparse
 import threading
 
 # --- Load config ---
-CONFIG_FILE = '.film_downloader_config.json'
+CONFIG_FILE = 'config.json'
 DEFAULT_ROOT = Path('D:/HHM')
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -138,6 +138,10 @@ def ensure_film_dirs(title, parent):
         (film_dir / sub).mkdir(exist_ok=True)
     return film_dir
 
+def is_trailer(filename):
+    name = filename.lower()
+    return 'trailer' in name or 'teaser' in name
+
 def organize_one(film_dir, copy_only=False, stub_unsorted=False):
     # Move or copy files into subfolders by asset type
     for file in film_dir.iterdir():
@@ -149,7 +153,7 @@ def organize_one(film_dir, copy_only=False, stub_unsorted=False):
             fname = file.name.lower()
             moved = False
             # Consistent asset folder naming
-            if 'trailer' in fname:
+            if is_trailer(fname):
                 dest = film_dir / 'Trailer'
                 moved = True
             elif 'poster' in fname:
@@ -583,7 +587,19 @@ if __name__ == '__main__':
         ensure_film_dirs(t, FEATURES)
     for t in SHORT_TITLES:
         ensure_film_dirs(t, SHORTS)
-    # --- Organize Shorts into block subfolders by play order ---
+    # 1. Organize dumped files
+    organize_all(FEATURES)
+    organize_all(SHORTS)
+    # 2. Organize from Unsorted and downloads (recursively, move only)
+    sources = []
+    if UNSORTED.exists():
+        sources.append(UNSORTED)
+    if DOWNLOADS.exists():
+        sources.append(DOWNLOADS)
+    if sources:
+        organize_from_sources(sources, FEATURES, SHORTS, FEATURE_TITLES, SHORT_TITLES)
+
+    # 3. Organize Shorts into block subfolders by play order
     from collections import defaultdict
     shorts_dir = SHORTS
     # Normalization for robust matching (dashes, underscores, spaces, case)
@@ -635,17 +651,7 @@ if __name__ == '__main__':
     unsorted_shorts = [t for t in SHORT_TITLES if (short_to_dir.get(norm_key(t)) and short_to_dir[norm_key(t)].exists() and norm_key(t) not in sorted_shorts)]
     if unsorted_shorts:
         log_info(f"Shorts not sorted into any block: {unsorted_shorts}")
-    # Organize dumped files
-    organize_all(FEATURES)
-    organize_all(SHORTS)
-    # Organize from Unsorted and downloads (recursively, move only)
-    sources = []
-    if UNSORTED.exists():
-        sources.append(UNSORTED)
-    if DOWNLOADS.exists():
-        sources.append(DOWNLOADS)
-    if sources:
-        organize_from_sources(sources, FEATURES, SHORTS, FEATURE_TITLES, SHORT_TITLES)
-    # Rebuild aggregate collections
+
+    # 4. Rebuild aggregate collections
     rebuild_aggregates()
     print('Done.')

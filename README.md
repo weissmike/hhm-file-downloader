@@ -1,30 +1,80 @@
-# Quick Start: Setting Up Python
 
-If you have never used Python before, follow these steps to get started:
+# HHM Film Festival Asset Management Toolkit
 
-1. **Install Python 3.8 or higher:**
-  - Go to [python.org/downloads](https://www.python.org/downloads/) and download the latest version for your operating system (Windows or macOS).
-  - Run the installer. **On Windows, make sure to check the box that says "Add Python to PATH" before clicking Install.**
-  - After installation, open a new Command Prompt (Windows) or Terminal (macOS) and type:
-    ```
-    python --version
-    ```
-    You should see something like `Python 3.10.0` or higher.
-
-2. **Download the scripts:**
-  - Place all the `.py` files (`film_downloader.py`, `organize_assets.py`, `asset_auditor.py`, `utils.py`) and your CSV file in the same folder.
-
-3. **First Run:**
-  - Open a Command Prompt or Terminal in that folder.
-  - Run the script you want (see below). The script will automatically install any missing Python packages the first time you run it. You may see some installation messages—this is normal.
+This toolkit streamlines the process of downloading, organizing, auditing, and preparing film assets for the festival. It is designed for repeatable, robust workflows and supports both features and shorts blocks.
 
 ---
 
-# Script Overview
+## Overview & Step-by-Step Example
 
-This toolkit includes three main scripts to help you manage, download, organize, and audit film festival assets. Each script is designed to be user-friendly and robust, even for beginners.
+**Typical Workflow:**
 
-## 1. film_downloader.py
+1. **Download new assets:**
+   - Run `film_downloader.py` to fetch new files into your downloads folder.
+2. **Organize everything:**
+   - Run `organize_assets.py` to sort all files into the master structure.
+3. **Audit your collection:**
+   - Run `asset_auditor.py` to check for missing or problematic files.
+4. **Create drive folders:**
+   - Run `create_drives.py` to build the folder structure for each showing.
+5. **(Optional) Generate QCPX files:**
+   - Run `create_qcpx.py` to create QuickCinema XML playlists for playback.
+
+**Repeat steps 1–4 as needed** until all assets are downloaded, sorted, and ready. All scripts are safe to re-run—they will skip or stub files as appropriate.
+
+---
+
+## Key CSV Files
+
+### 1. Festival Schedule CSV
+Defines the full festival schedule, including venues, showtimes, and block names (feature films or shorts blocks).
+  - **First Row:** [Venue], [Venue], [Venue]...
+  - **Columns:** [Day], [Time], [Block Name] (repeats for each venue) ...
+  - **Usage:** Used by scripts to determine which blocks/films to prepare for each venue and time slot.
+
+### 2. Shorts Blocks CSV
+Lists all shorts blocks and the ordered list of shorts in each block.
+  - **Columns:** [Block Name 1], [Block Name 2], ...
+  - **Usage:** Used to organize shorts into their correct block folders and ensure block names match the schedule.
+
+### 3. Film Submissions CSV
+Contains all film submission data, including contact info, download links, and asset details.
+  - **Columns:** [Film Name], [Contact Info], [Download Links], [Stills], [Poster], [Runtime], etc.
+  - **Usage:** Used by the downloader and asset auditor scripts to collect file information and generate mail-merge outputs.
+
+> **Note:** Block names must match exactly between the Festival Schedule and Shorts Blocks CSVs for correct matching. See the sample CSVs in this repo for reference.
+
+---
+
+## Configuration: `config.json`
+
+All scripts use a shared `config.json` file for paths and settings. Example:
+
+```json
+{
+  "root_dir": "D:/HHM",
+  "download_dir": "D:/HHM/downloads",
+  "unsorted_dir": "D:/HHM/Unsorted",
+  "TRAILERS_DIR": "_Trailers",
+  "PROMOS_DIR": "_Promos",
+  "BUMPER_DIR": "_Bumpers",
+  "SPONSORS_DIR": "_Sponsors",
+  "GAP_FILE": "3sec.mov",
+  "STEP_REPEAT_FILE": "StepAndRepeat.png",
+  "FILMS_DIR": "_Films",
+  "dir_match_threshold": 0.5,
+  "file_match_threshold": 0.4
+}
+```
+
+You can edit this file to match your storage layout. The organizer and all scripts will use the latest config values.
+
+---
+
+# Script Details
+
+## film_downloader.py
+
 
 **Purpose:**
 - Downloads films, trailers, posters, and stills in bulk from a CSV file of links.
@@ -36,43 +86,53 @@ This toolkit includes three main scripts to help you manage, download, organize,
 1. Prepare your CSV file with the required links.
 2. Open Command Prompt/Terminal in the script folder.
 3. Run:
-  ```
-  python film_downloader.py
-  ```
-  - The script will prompt you to select your CSV file, or you can use `--csv path/to/file.csv`.
-  - Downloads will be saved in a `downloads` folder (or as set in config).
-  - If you see errors about missing packages, just re-run the script after installation completes.
+   ```
+   python film_downloader.py
+   ```
+   - The script will prompt you to select your CSV file, or you can use `--csv path/to/file.csv`.
+   - Downloads will be saved in the `download_dir` (see config).
 
 **Features:**
 - Handles Google Drive, Dropbox, Vimeo, YouTube, direct links, and more.
 - Automatically resumes interrupted downloads and skips files that already exist or are stubbed.
 - Organizes files into subfolders by film and asset type.
 - Supports cookies for authenticated downloads (see below).
+- Allows optional CSV inputs for submissions, festival schedules, and shorts blocks.
+- Comprehensive logging and error handling.
 
-## 2. organize_assets.py
+
+---
+
+## organize_assets.py
+
 
 **Purpose:**
 - Sorts and organizes downloaded and unsorted files into a master folder structure for easy access.
 - Uses the same config as the downloader for consistent paths.
-- Moves files into `Features` and `Shorts` folders, with subfolders for each asset type.
+- Moves files into `Features` and `Shorts` folders, with subfolders for each asset type (Film, Trailer, Stills, Posters).
 - Rebuilds aggregate folders (symlinks/shortcuts) for quick browsing.
+- Adds trailer identification logic to streamline asset organization.
 
 **How to use:**
-1. Place any loose or extra files in your `Unsorted` folder (see config).
+1. Place any loose or extra files in your `unsorted_dir` (see config).
 2. Run:
-  ```
-  python organize_assets.py
-  ```
-  - The script will read your config and organize everything into the correct structure.
-  - No files are deleted—everything is moved or stubbed for safety.
+   ```
+   python organize_assets.py
+   ```
+   - The script will read your config and organize everything into the correct structure.
+   - No files are deleted—everything is moved or stubbed for safety.
 
 **Features:**
-- Reads and updates `.film_downloader_config.json` for all paths.
 - Fuzzy-matches film names and asset types for robust sorting.
 - Logs all actions for transparency.
+- Uses filename sanitization for Windows compatibility.
 
 
-## 3. asset_auditor.py
+
+---
+
+## asset_auditor.py
+
 
 **Purpose:**
 - Audits your organized asset folders to find missing, oversized, or misplaced files.
@@ -80,16 +140,17 @@ This toolkit includes three main scripts to help you manage, download, organize,
 
 **How to use:**
 1. After organizing assets, run:
-  ```
-  python asset_auditor.py --root D:/HHM --out D:/HHM/Audit/asset_audit_report.md --mail-merge
-  ```
-  - The script will scan your folders and produce a report in Markdown format.
-  - It will also generate a mail-merge CSV (`mail_merge_emails.csv`) in the `Audit` folder with friendly advice for each filmmaker if any issues are found.
+   ```
+   python asset_auditor.py --root D:/HHM --out D:/HHM/Audit/asset_audit_report.md --mail-merge
+   ```
+   - The script will scan your folders and produce a report in Markdown format.
+   - It will also generate a mail-merge CSV (`mail_merge_emails.csv`) in the `Audit` folder with friendly advice for each filmmaker if any issues are found.
 
 **Features:**
 - Checks for missing, stubbed, or oversized files.
 - Summarizes issues in a human-readable report.
 - Generates a mail-merge CSV for personalized filmmaker outreach.
+- Uses ffprobe/ffmpeg for technical details (see below for install instructions).
 
 ### Mail-Merge CSV Columns
 
@@ -120,32 +181,60 @@ Festival Tech Team
 
 You can use your favorite mail-merge tool (e.g., Google Sheets, Outlook, Mailchimp) to send personalized emails using the CSV generated by this script.
 
-## 4. create_drives.py
+
+---
+
+## create_drives.py
+
 
 **Purpose:**
 - Interactively builds a drive/folder structure for each festival showing, copying only the needed film assets for each block or feature.
 - For shorts blocks, copies the entire numbered subfolders (created by `organize_assets.py`) directly from `Shorts` to the output, preserving numbering and order.
 - For features or other films, copies the main film file as usual.
 - Supports dry-run mode to preview what would be created/copied.
+- Handles CSV file selection and drive existence checks.
 
 **How to use:**
 1. Run:
-   ```
-   python create_drives.py --output-root D:/Path/To/DriveRoot
-   ```
-   - Optionally add `--dry-run` to preview the folder/file tree without copying.
-   - You can also set `--assets-root` if your assets are not in the default location (from config).
-
+  ```
+  python create_drives.py --output-root D:/Path/To/DriveRoot
+  ```
+  - Optionally add `--dry-run` to preview the folder/file tree without copying.
+  - You can also set `--assets-root` if your assets are not in the default location (from config).
 2. When prompted, paste a tab-delimited list of showings (one per line):
-   - Format: `Day<TAB>Time<TAB>Block or Film Name`
-   - Example:
-     ```
-     Friday	7:00 PM	Shorts 1
-     Friday	9:00 PM	Feature Film Title
-     Saturday	2:00 PM	Shorts 2
-     Saturday	4:00 PM	Another Feature
-     ```
-   - End input with an empty line.
+  - Format: `Day<TAB>Time<TAB>Block or Film Name`
+  - Example:
+    ```
+    Friday	7:00 PM	Shorts 1
+    Friday	9:00 PM	Feature Film Title
+    Saturday	2:00 PM	Shorts 2
+    Saturday	4:00 PM	Another Feature
+    ```
+  - End input with an empty line.
+---
+
+## create_qcpx.py
+
+**Purpose:**
+- Generates QuickCinema QCPX XML playlist files for playback, based on festival CSVs and config.
+- Ensures all referenced files exist in the drive/block folder.
+
+**How to use:**
+1. Run:
+  ```
+  python create_qcpx.py --festival-schedule path/to/schedule.csv --shorts-blocks path/to/shorts.csv --submissions path/to/submissions.csv --block-path path/to/block/folder --block-name "Block Name"
+  ```
+  - Optionally set `--output` to specify the QCPX file path (default: `<block-path>/<block-name>.qcpx`).
+  - The script will look up films for the block, find their files, and generate the QCPX XML.
+
+**Features:**
+- Uses config for root and asset directories.
+- Finds films for the block (feature or shorts block) and adds them in order.
+- Optionally includes trailers, promos, sponsors, bumpers, and step-and-repeat graphics if present in config.
+- Sanitizes filenames for Windows compatibility.
+- Logs warnings if any film file is missing.
+
+---
 
 **Notes:**
 - For shorts blocks, the script will copy each numbered subfolder (e.g., `Shorts 1/01_FilmName`, `Shorts 1/02_FilmName`, etc.) into the output, preserving the order and folder names.
@@ -161,21 +250,32 @@ You can use your favorite mail-merge tool (e.g., Google Sheets, Outlook, Mailchi
 
 ---
 
-# Typical Workflow
 
-1. **Download new assets:**
-  - Run `film_downloader.py` to fetch new files into your downloads folder.
-2. **Organize everything:**
-  - Run `organize_assets.py` to sort all files into the master structure.
-3. **Audit your collection:**
-  - Run `asset_auditor.py` to check for missing or problematic files.
-4. **Create drive folders:**
-  - Run `create_drives.py` to build the folder structure for each showing.
+# Quick Start: Setting Up Python
 
-You can repeat these steps as needed. All scripts are safe to re-run—they will skip or stub files as appropriate.
+If you have never used Python before, follow these steps to get started:
+
+1. **Install Python 3.8 or higher:**
+   - Go to [python.org/downloads](https://www.python.org/downloads/) and download the latest version for your operating system (Windows or macOS).
+   - Run the installer. **On Windows, make sure to check the box that says "Add Python to PATH" before clicking Install.**
+   - After installation, open a new Command Prompt (Windows) or Terminal (macOS) and type:
+     ```
+     python --version
+     ```
+     You should see something like `Python 3.10.0` or higher.
+
+2. **Download the scripts:**
+   - Place all the `.py` files and your CSV files in the same folder.
+
+3. **First Run:**
+   - Open a Command Prompt or Terminal in that folder.
+   - Run the script you want (see above). The script will automatically install any missing Python packages the first time you run it. You may see some installation messages—this is normal.
 
 ---
-# Film & Trailer Bulk Downloader
+
+---
+
+# Additional Notes
 
 ## Purpose
 
@@ -283,43 +383,8 @@ Some Vimeo links require you to be logged in to download. To allow yt-dlp to acc
 
 For more details, see the [yt-dlp cookies guide](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
 
-## Asset Organization Workflow
 
-The `organize_assets.py` script uses the same configuration as the downloader to keep your workflow consistent and flexible.
-
-- **Config file:** `.film_downloader_config.json` stores the following keys:
-  - `root_dir`: The root directory for all assets (default: `D:/HHM`)
-  - `download_dir`: The folder where the downloader puts new files (default: `<root>/downloads`)
-  - `unsorted_dir`: A drop zone for any loose or extra files you want to organize (default: `<root>/Unsorted`)
-
-- **How it works:**
-  - The script reads these paths from the config file (and adds missing keys if needed).
-  - It recursively processes both the `download_dir` and `unsorted_dir`, moving files into the correct `Features` and `Shorts` folders and subfolders by asset type.
-  - Aggregate folders (e.g., `_Films`, `_Trailers`, etc.) are rebuilt as symlink collections for easy access.
-
-- **Workflow:**
-  1. Drop any new/loose files into your `unsorted_dir` (see config).
-  2. Run `film_downloader.py` as usual to fetch new downloads into `download_dir`.
-  3. Run `organize_assets.py` to sort everything into the master structure.
-  4. All config paths can be changed by editing `.film_downloader_config.json`.
-
-- **Example config:**
-
-```json
-{
-  "root_dir": "D:/HHM",
-  "download_dir": "D:/HHM/downloads",
-  "unsorted_dir": "D:/HHM/Unsorted"
-}
-```
-
-- **Tip:**
-  - You can add or change these paths in the config file at any time to match your storage layout.
-  - The organizer will always use the latest config values.
-
----
-
-# ffprobe/ffmpeg Requirement for Asset Auditing
+## ffprobe/ffmpeg Requirement for Asset Auditing
 
 To extract technical details (runtime, codecs, resolution, etc.) for video files, the `asset_auditor.py` script requires `ffprobe` (part of the free [ffmpeg](https://ffmpeg.org/) toolkit).
 

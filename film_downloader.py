@@ -70,7 +70,7 @@ except ImportError:
 ######################################################################
 
 
-CONFIG_FILE = ".film_downloader_config.json"
+CONFIG_FILE = "config.json"
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -90,7 +90,9 @@ def save_config(cfg):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Festival Film / Trailer Bulk Downloader")
-    parser.add_argument("--csv", help="Path to the CSV file")
+    parser.add_argument("--submissions", help="Path to the Film Submissions CSV file (default: prompt)")
+    parser.add_argument("--festival-schedule", help="Path to the Festival Schedule CSV file (optional)")
+    parser.add_argument("--shorts-blocks", help="Path to the Shorts Blocks CSV file (optional)")
     parser.add_argument("--out", default=None, help="Root output directory (persists for future runs)")
     parser.add_argument("--include-stills", action="store_true", help="Include still image URLs")
     parser.add_argument("--include-poster", action="store_true", help="Include poster URLs")
@@ -501,15 +503,20 @@ def gather_download_jobs(csv_path):
 
 def main():
 
-    csv_path = ARGS.csv or choose_csv_file(prompt="Enter path to CSV file:", file_ext=".csv")
-    if not csv_path or not os.path.isfile(csv_path):
-        print(red(f"ERROR: CSV file not found: {csv_path}"))
+    from utils import choose_csv_file
+    submissions_csv = ARGS.submissions or choose_csv_file(prompt="Select the Film Submissions CSV file:")
+    if not submissions_csv or not os.path.isfile(submissions_csv):
+        print(red(f"ERROR: Film Submissions CSV file not found: {submissions_csv}"))
         sys.exit(1)
+
+    # Optionally prompt for schedule/shorts-blocks for future use or validation
+    festival_schedule_csv = ARGS.festival_schedule or choose_csv_file(prompt="(Optional) Select the Festival Schedule CSV file:")
+    shorts_blocks_csv = ARGS.shorts_blocks or choose_csv_file(prompt="(Optional) Select the Shorts Blocks CSV file:")
 
     os.makedirs(ARGS.out, exist_ok=True)
 
-    log_info("[STEP] Parsing CSV...")
-    rows, jobs = gather_download_jobs(csv_path)
+    log_info("[STEP] Parsing Film Submissions CSV...")
+    rows, jobs = gather_download_jobs(submissions_csv)
     log_info(f"  Found {len(rows)} data rows.")
     log_info(f"  Extracted {len(jobs)} candidate download URLs after filtering.\n")
 
@@ -530,28 +537,42 @@ def main():
     def worker(job, tqdm_position):
         nonlocal counter
         film_dir_name = safe_filename(job["film_name"]) or f"Film_{job['row_index']}"
-        # Always use canonical asset folder; fallback to 'Film' if unknown
-        canonical_folder = ASSET_TYPE_FOLDERS.get(job["asset_type"].lower(), 'Film')
-        dest_dir = os.path.join(ARGS.out, film_dir_name, canonical_folder)
+        asset_type_key = job["asset_type"].lower()
+        canonical_folder = ASSET_TYPE_FOLDERS.get(asset_type_key)
+        if canonical_folder:
+            dest_dir = os.path.join(ARGS.out, film_dir_name, canonical_folder)
+        else:
+            # Unknown asset type: put in the block folder (same level as Film, Stills, etc.)
+            dest_dir = os.path.join(ARGS.out, film_dir_name)
         os.makedirs(dest_dir, exist_ok=True)
 
         raw_url = job["url"].strip()
         transformed_url, strategy = direct_download_transform(raw_url)
 
-        base_file_name = safe_filename(f"{job['film_name']}_{job['asset_type']}")
-        counter += 1
-
-        # Try to guess extension up-front
-        ext = ".bin"
-        try:
-            head_resp = requests.head(raw_url, allow_redirects=True, timeout=10)
-            if head_resp.status_code == 200:
-                ext = guess_extension_from_headers(head_resp.headers, fallback=ext)
-        except Exception:
-            pass
-
-        out_path = os.path.join(dest_dir, base_file_name + ext)
-        log_debug(f"base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'")
+        # For stills, use the original filename from the URL if possible
+        if job["asset_type"].lower() == "stills":
+            # Try to extract filename from URL
+            from urllib.parse import urlparse, unquote
+            url_path = urlparse(raw_url).path
+            orig_filename = os.path.basename(url_path)
+            if not orig_filename or '.' not in orig_filename:
+                # fallback to safe_filename
+                orig_filename = safe_filename(f"{job['film_name']}_still.jpg")
+            out_path = os.path.join(dest_dir, orig_filename)
+            log_debug(f"[STILLS] out_path: '{out_path}' (orig_filename: '{orig_filename}')")
+        else:
+            base_file_name = safe_filename(f"{job['film_name']}_{job['asset_type']}")
+            counter += 1
+            # Try to guess extension up-front
+            ext = ".bin"
+            try:
+                head_resp = requests.head(raw_url, allow_redirects=True, timeout=10)
+                if head_resp.status_code == 200:
+                    ext = guess_extension_from_headers(head_resp.headers, fallback=ext)
+            except Exception:
+                pass
+            out_path = os.path.join(dest_dir, base_file_name + ext)
+            log_debug(f"base_file_name: '{base_file_name}', ext: '{ext}', out_path: '{out_path}'")
 
 
         # Check if file already exists, is complete, or a stub exists BEFORE any download attempt

@@ -1,3 +1,9 @@
+import re
+def sanitize_filename(name):
+    # Remove or replace characters not allowed in Windows filenames
+    # Replace both colons and dashes with a dash for time consistency
+    name = re.sub(r'[:\-]', '-', name)
+    return re.sub(r'[<>"/\\|?*]', '_', name)
 """
 create_drives.py (interactive version)
 
@@ -16,11 +22,9 @@ import shutil
 from pathlib import Path
 from utils import log_info, log_error, log_debug, set_log_level
 
-# Import the asset auditor's programmatic API
-from asset_auditor import audit_assets
 
 def load_config():
-    CONFIG_FILE = '.film_downloader_config.json'
+    CONFIG_FILE = 'config.json'
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -103,25 +107,6 @@ def copy_asset(src, dest, dry_run=False):
         log_error(f"Error copying file {src} to {dest}: {e}")
 
 def main():
-
-
-    parser = argparse.ArgumentParser(description="Interactive: Organize assets for showings/blocks pasted by user.")
-    parser.add_argument('--assets-root', default=None, help='Root directory containing Features/Shorts (default: from config)')
-    parser.add_argument('--output-root', required=True, help='Root directory for output drives/folders')
-    parser.add_argument('--log-level', default='info', choices=['debug', 'info', 'none'], help='Set log level')
-    parser.add_argument('--dry-run', action='store_true', help='Print what would be created/copied, but do not actually copy')
-    parser.add_argument('--shorts-csv', default=None, help='Path to Shorts CSV file to use for drive audit report (film list)')
-    args = parser.parse_args()
-
-    set_log_level(args.log_level)
-    config = load_config()
-    assets_root = args.assets_root or config.get('root_dir', '.')
-    log_info(f"Using assets root: {assets_root}")
-    log_info(f"Output root: {args.output_root}")
-    if args.dry_run:
-        log_info("Running in DRY RUN mode. No files or folders will be created.")
-
-
     # Helper to copy missing files/folders
     def copy_with_progress(src, dst):
         """Copy a file with a progress bar if tqdm is available."""
@@ -154,31 +139,94 @@ def main():
                     log_info(f"Copying file: {s} -> {d}")
                     copy_with_progress(s, d)
 
-    # Helper to parse shorts CSV for film list
-    def parse_shorts_csv(csv_path):
-        import csv
-        films = set()
-        if not csv_path or not os.path.exists(csv_path):
-            return []
-        with open(csv_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            field = next((h for h in reader.fieldnames if 'film' in h.lower() or 'title' in h.lower()), None)
-            if not field:
-                return []
-            for row in reader:
-                val = row[field].strip()
-                if val:
-                    films.add(val)
-        return sorted(films)
+
+    parser = argparse.ArgumentParser(description="Interactive: Organize assets for showings/blocks pasted by user.")
+    parser.add_argument('--assets-root', default=None, help='Root directory containing Features/Shorts (default: from config)')
+    parser.add_argument('--output-root', required=True, help='Root directory for output drives/folders')
+    parser.add_argument('--log-level', default='info', choices=['debug', 'info', 'none'], help='Set log level')
+    parser.add_argument('--dry-run', action='store_true', help='Print what would be created/copied, but do not actually copy')
+    parser.add_argument('--shorts-csv', default=None, help='Path to Shorts CSV file to use for drive audit report (film list)')
+    args = parser.parse_args()
+
+
+    set_log_level(args.log_level)
+
+    config = load_config()
+    assets_root = args.assets_root or config.get('root_dir', '.')
+    log_info(f"Using assets root: {assets_root}")
+    log_info(f"Output root: {args.output_root}")
+    if args.dry_run:
+        log_info("Running in DRY RUN mode. No files or folders will be created.")
+
+    # --- Check if output drive exists ---
+    output_root_path = Path(args.output_root)
+    drive = output_root_path.drive or str(output_root_path).split(os.sep)[0] + os.sep
+    if drive and not os.path.exists(drive):
+        print(f"\n[ERROR] Output drive '{drive}' does not exist. Please insert or mount the drive and try again.")
+        sys.exit(1)
+
+    # Prompt for CSVs
+    from utils import choose_csv_file
+    print("Select the Festival Schedule CSV file:")
+    schedule_csv = choose_csv_file(prompt="Select the Festival Schedule CSV file:")
+    print("Select the Shorts Blocks CSV file:")
+    shorts_blocks_csv = choose_csv_file(prompt="Select the Shorts Blocks CSV file:")
+    print("Select the Film Submissions CSV file:")
+    film_submissions_csv = choose_csv_file(prompt="Select the Film Submissions CSV file:")
+
+    # Parse Festival Schedule CSV (repeating 3-column groups for each venue, venue name can be in any of the three columns)
+    import csv
+    showings = []
+    with open(schedule_csv, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        # Find all venue names and their starting column indices
+        venue_groups = []  # List of (venue_name, start_col_idx)
+        col = 0
+        while col < len(header):
+            group = header[col:col+3]
+            venue = next((cell.strip() for cell in group if cell and cell.strip()), None)
+            if venue:
+                venue_groups.append((venue, col))
+            col += 3
+        if not venue_groups:
+            print("No venue columns found in schedule CSV header.")
+            return
+        print("Available venues:")
+        for i, (venue, idx) in enumerate(venue_groups):
+            print(f"{i+1}. {venue}")
+        print(f"{len(venue_groups)+1}. Backup (recursive copy of root folder)")
+        venue_choice = input(f"Select a venue (1-{len(venue_groups)+1}): ").strip()
+        try:
+            venue_idx = int(venue_choice) - 1
+            if venue_idx == len(venue_groups):
+                # Backup mode
+                log_info("Backup mode selected. Copying entire root folder recursively.")
+                shutil.copytree(assets_root, args.output_root, dirs_exist_ok=True)
+                return
+            selected_venue, start_col = venue_groups[venue_idx]
+        except Exception:
+            print("Invalid venue selection.")
+            return
+
+        # For the selected venue, collect (day, time, block) for all non-empty blocks in that venue's 3-column group
+        for row in reader:
+            if len(row) <= start_col+2:
+                continue
+            day = row[start_col].strip()
+            time = row[start_col+1].strip()
+            block = row[start_col+2].strip()
+            if block:
+                showings.append((day, time, block))
 
     # 1. Create the output folder if not exist
     Path(args.output_root).mkdir(parents=True, exist_ok=True)
 
-    # 2. Copy Sponsors and _Trailers to that folder
-    sponsors_src = Path(assets_root) / 'Sponsors'
+    # 2. Copy _Sponsors, _Preroll and _Trailers to that folder
+    sponsors_src = Path(assets_root) / '_Sponsors'
     sponsors_dst = Path(args.output_root) / 'Sponsors'
     if sponsors_src.exists() and sponsors_src.is_dir():
-        log_info(f"Ensuring all Sponsors assets exist in {sponsors_dst}")
+        log_info(f"Ensuring all _Sponsors assets exist in {sponsors_dst}")
         copy_missing(sponsors_src, sponsors_dst)
     else:
         log_info("No Sponsors folder found to copy.")
@@ -191,35 +239,138 @@ def main():
     else:
         log_info("No _Trailers folder found to copy.")
 
-    # 3. Prompt for showings and build file structure
-    print("Paste your showings (tab-delimited: Day<TAB>Time<TAB>Block/Film Name), one per line. End with an empty line:")
-    showings = []
-    while True:
-        line = input()
-        if not line.strip():
-            break
-        parts = line.split('\t')
-        if len(parts) < 3:
-            print("Invalid line, must have Day, Time, Block/Film Name (tab-delimited). Skipping.")
-            continue
-        day, time, title = parts[0].strip(), parts[1].strip(), parts[2].strip()
-        if not title:
-            continue
-        showings.append((day, time, title))
+    preroll_src = Path(assets_root) / '_Preroll'
+    preroll_dst = Path(args.output_root) / '_Preroll'
+    if preroll_src.exists() and preroll_src.is_dir():
+        log_info(f"Ensuring all _Preroll assets exist in {preroll_dst}")
+        copy_missing(preroll_src, preroll_dst)
+    else:
+        log_info("No _Preroll folder found to copy.")
 
-    # 4. If shorts blocks found, prompt for Shorts CSV and parse it
-    shorts_blocks = [title for _, _, title in showings if 'shorts' in title.lower()]
-    shorts_csv_list = []
-    shorts_csv_path = None
-    if shorts_blocks:
-        from utils import choose_csv_file
-        shorts_csv_path = args.shorts_csv or choose_csv_file(prompt="Select the Shorts CSV file for the drive audit report:")
-        if shorts_csv_path:
-            shorts_csv_list = parse_shorts_csv(shorts_csv_path)
+    # 3. Build file structure from showings
+    shorts_dir = Path(assets_root) / 'Shorts'
+    features_dir = Path(assets_root) / 'Features'
+    film_names = set(block for _, _, block in showings if block)
+    # --- Add all shorts in each shorts block to film_names ---
+    shorts_dir = Path(assets_root) / 'Shorts'
+    for _, _, block in showings:
+        if 'shorts' in block.lower():
+            block_folder = shorts_dir / block
+            if block_folder.exists() and block_folder.is_dir():
+                for numbered_short in block_folder.iterdir():
+                    if numbered_short.is_dir():
+                        # Add the short's folder name (should match film name)
+                        film_names.add(numbered_short.name)
 
-    # 5. Build the full film list
-    film_names = set(title for _, _, title in showings if title)
-    film_names.update(shorts_csv_list)
+    import subprocess
+    for day, time, name in showings:
+        def sanitize(s):
+            return sanitize_filename(s)
+        safe_time = sanitize(time)
+        safe_name = sanitize(name)
+        show_folder = f"{sanitize_filename(day)}\{safe_time} - {safe_name}"
+        show_dir = Path(args.output_root) / show_folder
+        show_dir.mkdir(parents=True, exist_ok=True)
+        if 'shorts' in name.lower():
+            block_folder = shorts_dir / name
+            if block_folder.exists() and block_folder.is_dir():
+                for numbered_short in sorted(block_folder.iterdir()):
+                    if numbered_short.is_dir():
+                        film_dir = numbered_short / 'Film'
+                        if film_dir.exists() and film_dir.is_dir():
+                            film_files = [f for f in film_dir.iterdir() if f.is_file() and f.suffix.lower() in {'.mp4', '.mov', '.mkv', '.avi', '.wmv', '.m4v', '.mpg', '.mpeg', '.webm'}]
+                            for film_file in film_files:
+                                dest = show_dir / f"{sanitize_filename(numbered_short.name)}_{sanitize_filename(film_file.name)}"
+                                if dest.exists():
+                                    src_size = film_file.stat().st_size
+                                    dest_size = dest.stat().st_size
+                                    if src_size > dest_size:
+                                        log_info(f"OVERWRITE (src larger): {film_file} ({src_size}) -> {dest} ({dest_size})")
+                                        copy_with_progress(film_file, dest)
+                                    else:
+                                        log_info(f"SKIP (already exists, same or larger): {film_file} ({src_size}) -> {dest} ({dest_size})")
+                                else:
+                                    log_info(f"Copying short: {film_file} -> {dest}")
+                                    copy_with_progress(film_file, dest)
+                        else:
+                            log_error(f"No Film subfolder in {numbered_short}")
+            else:
+                log_error(f"Shorts block folder not found: {block_folder}")
+        else:
+            # Feature or other film
+            all_titles = set()
+            for sub in ['Features', 'Shorts']:
+                folder = Path(assets_root) / sub
+                if folder.exists():
+                    for d in folder.iterdir():
+                        if d.is_dir():
+                            all_titles.add(d.name)
+            asset = find_asset(name, assets_root, all_titles=all_titles)
+            dest = show_dir / (sanitize_filename(asset.name) if asset else f"{sanitize_filename(name)} (NOT FOUND)")
+            if asset:
+                if dest.exists():
+                    src_size = asset.stat().st_size
+                    dest_size = dest.stat().st_size
+                    if src_size > dest_size:
+                        log_info(f"OVERWRITE (src larger): {asset} ({src_size}) -> {dest} ({dest_size})")
+                        copy_with_progress(asset, dest)
+                    else:
+                        log_info(f"SKIP (already exists, same or larger): {asset} ({src_size}) -> {dest} ({dest_size})")
+                else:
+                    log_info(f"Copying feature: {asset} -> {dest}")
+                    copy_with_progress(asset, dest)
+            else:
+                log_error(f"[FEATURE NOT FOUND] '{name}' not matched.")
+
+        # --- Call create_qcpx.py for this block ---
+        try:
+            qcpx_args = [
+                sys.executable, 'create_qcpx.py',
+                '--festival-schedule', schedule_csv,
+                '--shorts-blocks', shorts_blocks_csv,
+                '--submissions', film_submissions_csv,
+                '--block-path', str(show_dir),
+                '--block-name', name
+            ]
+            log_info(f"Generating QCPX for block '{name}' at {show_dir}...")
+            subprocess.run(qcpx_args, check=True)
+        except Exception as e:
+            log_error(f"Failed to generate QCPX for block '{name}': {e}")
+
+    # 4. Fuzzy match film_names to actual asset names in Features/Shorts
+    from utils import fuzzy_match_title
+    all_titles = set()
+    for sub in ['Features', 'Shorts']:
+        folder = Path(assets_root) / sub
+        if folder.exists():
+            for d in folder.iterdir():
+                if d.is_dir():
+                    all_titles.add(d.name)
+    matched_titles = set()
+    for title in film_names:
+        best_match, score = fuzzy_match_title(title, list(all_titles), threshold=0.7)
+        if best_match:
+            matched_titles.add(best_match)
+    final_film_list = sorted(matched_titles)
+
+    # 5. Call asset_auditor.py as a subprocess, passing the film list
+    import subprocess
+    audit_path = Path(args.output_root) / 'asset_audit_report.md'
+    film_list_arg = ','.join(final_film_list)
+    cmd = [
+        sys.executable, 'asset_auditor.py',
+        '--root', str(assets_root),
+        '--out', str(audit_path),
+        '--film-list', film_list_arg
+    ]
+    log_info(f"Running asset_auditor.py for films: {final_film_list}")
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        log_error(f"Failed to generate audit report: {e}")
+
+    # --- Print dry-run tree summary at the very end ---
+    dry_run_paths = []  # Placeholder for future dry-run path tracking
 
     # 6. Create file structure and copy screener assets
     shorts_dir = Path(assets_root) / 'Shorts'
@@ -299,16 +450,7 @@ def main():
             matched_titles.add(best_match)
     final_film_list = sorted(matched_titles)
 
-    # 8. Call asset auditor, passing the list of films we are interested in
-    try:
-        audit_path = Path(args.output_root) / 'asset_audit_report.md'
-        if final_film_list:
-            log_info(f"Generating audit report at {audit_path} for films: {final_film_list}, scanning assets root: {assets_root}")
-        else:
-            log_info(f"Generating audit report at {audit_path} (no film list provided), scanning assets root: {assets_root}")
-        audit_assets(assets_root, str(audit_path), film_titles=final_film_list, log_level=args.log_level)
-    except Exception as e:
-        log_error(f"Failed to generate audit report: {e}")
+    # (Removed duplicate/old programmatic audit_assets call. Only subprocess call is used.)
 
     # --- Print dry-run tree summary at the very end ---
     if args.dry_run:
